@@ -42,8 +42,8 @@ cd HITLO_Symmetry
 pip install -r requirements.txt
 ```
 
-See [docs/setup.md](docs/setup.md) for detailed hardware setup and
-troubleshooting.
+See [docs/getting_started.md](docs/getting_started.md) for a 10-minute setup
+walkthrough including hardware setup and troubleshooting.
 
 ---
 
@@ -78,24 +78,21 @@ HITLO_Symmetry/
 ├── apps/                     # user-facing tools
 │   ├── run_experiment.py     # Streamlit UI for live BO trials
 │   ├── diagnose_trial.py     # standalone trial QC plotter
+│   ├── gp_viewer.py          # interactive GP surface viewer (post-hoc)
 │   └── collect_sensors.py    # BLE sensor startup script
 │
 ├── scripts/                  # batch / dev utilities
-│   ├── generate_fake_trials.py
-│   ├── batch_analyze.py      # run diagnostic on a whole session
-│   └── check_sensor_sync.py
+│   └── analyze_experiment.py # full post-hoc session analysis
 │
 ├── config/
-│   └── exo_symmetry_config.yml  # experiment parameters
+│   └── exo_symmetry_config.example.yml  # template — copy to exo_symmetry_config.yml
 │
 ├── docs/                     # extended documentation
-│   ├── setup.md              # installation & hardware
+│   ├── getting_started.md    # 10-minute setup + first run guide
 │   ├── workflow.md           # experiment-day procedure
-│   ├── detection_pipeline.md # algorithm details + references
-│   └── troubleshooting.md    # common issues
+│   └── detection_pipeline.md # algorithm details + references
 │
-└── tests/                    # unit tests (synthetic data)
-    └── test_detection.py
+└── tests/                    # unit tests (currently minimal)
 ```
 
 ---
@@ -193,3 +190,18 @@ MIT (see [LICENSE](LICENSE))
 
 HIL_toolkit is separately licensed; see its
 [repository](https://github.com/UICRRL/HIL_toolkit) for details.
+
+---
+
+## Research use disclaimer
+
+This is **research code** for an investigational device used under IRB-approved
+human subjects protocols. It is **not** an FDA-cleared medical device. The
+exoskeleton's safety constraints (90 Nm hard cap, PF zone limits, top-K
+acquisition fallback) protect against most failure modes we've encountered, but
+this code should only be used by trained researchers in a supervised lab
+setting with appropriate participant safety procedures (gait belt, treadmill
+emergency stop, screening for contraindications).
+
+If you are adapting this for your own work and have questions about safety or
+clinical use, contact Mac Camardo before deploying.

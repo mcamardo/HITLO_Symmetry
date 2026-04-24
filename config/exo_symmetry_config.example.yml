@@ -1,0 +1,116 @@
+# =============================================================================
+# HITLO_Symmetry — Experiment Configuration Template
+# =============================================================================
+#
+# This file controls every aspect of a HITLO experiment. Edit the values below
+# for your subject and session, then save. NO Python code changes are needed.
+#
+# To start a new session:
+#   1. Copy this file:  cp config/exo_symmetry_config.example.yml config/exo_symmetry_config.yml
+#   2. Edit Subject.id and Subject.session for your participant
+#   3. Run:  streamlit run apps/run_experiment.py
+#
+# Values shown are reasonable defaults. Tune Cost.lambda_pf and Cost.mu_df if
+# you want shape-aware optimization (currently disabled — pure symmetry).
+# =============================================================================
+
+
+Subject:
+  # Participant identifier (e.g. "P049"). Used in BIDS-style filenames:
+  #   sub-{id}_ses-{session}_task-Default_run-{NN}_eeg.xdf
+  id: P000
+
+  # Session identifier — typically S001 for first visit, S002 for follow-up
+  session: S001
+
+  # Where data is saved. The full path becomes:
+  #   {base_dir}/sub-{id}/ses-{session}/eeg/
+  base_dir: /Users/yourname/HITLO
+
+
+# =============================================================================
+# Sensor configuration
+# =============================================================================
+
+sensors:
+  # MAC address suffixes for your Polar H10s (find via `python apps/collect_sensors.py left`)
+  # You'll see scan output that lists discoverable Polar devices with their IDs.
+  left_id:  "7F302C25"
+  right_id: "80AE3629"
+
+  # Sample rate Polar H10 streams accel at — should be 200 (do not change)
+  sample_rate_hz: 200
+
+
+# =============================================================================
+# Optimization parameters
+# =============================================================================
+
+Optimization:
+  # Number of dimensions in the parameter space (R and L0 = 2)
+  n_parms: 2
+
+  # Total number of trials per session
+  n_steps: 15
+
+  # First N trials are LHS exploration; remaining (n_steps - n_exploration)
+  # are GP-driven Bayesian optimization
+  n_exploration: 5
+
+  # Parameter search box: [[R_min, L0_min], [R_max, L0_max]]
+  # R = anchor moment arm (m), L0 = spring rest length (m)
+  # These bounds are mechanism-specific — confirm before changing
+  range:
+    - [0.24, 0.30]    # mins
+    - [0.35, 0.40]    # maxes
+
+  # ---------------------------------------------------------------------------
+  # Safety constraints
+  # ---------------------------------------------------------------------------
+  # Plantarflexion zone — angles where the spring should NOT produce torque
+  # (during PF, the foot is going down; spring resistance there fights the user)
+  pf_zone_deg: [2.0, 20.0]
+
+  # Hard cap on spring torque inside the PF zone (Nm)
+  pf_torque_threshold: 4.0
+
+  # Dorsiflexion check angle (degrees, negative = DF direction)
+  # The DF reward / floor is computed at this specific angle
+  df_check_angle_deg: -10.0
+
+  # Minimum DF assist torque required during the BO phase (Nm)
+  # Set to 0 to allow zero-engagement springs in BO; set to ~5-10 to
+  # require minimum DF assistance.
+  df_min_bo_nm: 0.0
+
+  # Maximum DF assist target during exploration (Nm). Used to ramp DF
+  # constraints linearly from 0 (trial 1) to this value (trial n_exploration).
+  min_df_torque_nm: 20.0
+
+
+# =============================================================================
+# Cost function
+# =============================================================================
+
+Cost:
+  # Trial duration in seconds — how long the participant walks per trial
+  time: 60
+
+  # Drop the first/last N seconds of each trial (ramp-up/ramp-down)
+  trim_seconds: 3.0
+
+  # Use signed symmetry (true) or absolute symmetry (false)
+  # Signed: BO sees direction of asymmetry, learns to push toward zero
+  # Unsigned: BO only sees magnitude, can't distinguish overshoot from undershoot
+  signed: true
+
+  # ---------------------------------------------------------------------------
+  # Spring shape penalty weights
+  # ---------------------------------------------------------------------------
+  # lambda_pf: penalty for torque in the PF zone (>0 → discourage PF resistance)
+  # mu_df:     reward for DF assist at df_check_angle (>0 → encourage DF assist)
+  #
+  # Set both to 0 for pure symmetry optimization (current default).
+  # Hard safety constraints (above) still apply regardless.
+  lambda_pf: 0.0
+  mu_df: 0.0

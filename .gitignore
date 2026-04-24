@@ -41,3 +41,4 @@ logs/
 build/
 dist/
 *.egg
+config/exo_symmetry_config.yml
