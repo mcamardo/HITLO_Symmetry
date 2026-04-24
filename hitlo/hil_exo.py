@@ -1,6 +1,8 @@
 """
 hitlo.hil_exo — experiment driver with exoskeleton safety constraints.
 
+Version 2.3.0 — Top-K acquisition fallback for unsafe BO suggestions
+                (replaces uniform random fallback)
 Version 2.2.0 — LHS exploration sampling for better parameter space coverage
                 DF hard floor during BO (df_min_bo_nm), mu_df removed from cost
                 Graduated DF torque ramp during exploration, DF hard constraint
@@ -330,8 +332,19 @@ class HIL_Exo:
           - PF zone cap
           - DF minimum hard floor during BO (df_min_bo_nm)
 
-        If the raw suggestion fails, tries up to 500 random replacements.
-        If no replacement is safe, returns the raw suggestion (logged).
+        Strategy:
+          1. Try the BO's argmax suggestion. If safe, return it.
+          2. If unsafe, evaluate the acquisition function across a dense grid
+             of the parameter space, rank by EI value, and walk down the
+             ranking returning the first safe point. This preserves the BO's
+             ranking of "promising" regions rather than reverting to random.
+          3. As a last resort (almost never reached), random sample.
+
+        Top-K ranked fallback is theoretically much better than random:
+          - Random sampling: throws away all GP information, picks an
+            arbitrary point that is unlikely to be informative
+          - Top-K ranked: stays in the high-EI region (where the GP wanted
+            to look), just sidesteps the unsafe sub-region
         """
         opt = self.args["Optimization"]
         pf_zone = opt.get("pf_zone_deg", [2.0, 20.0])
@@ -344,6 +357,7 @@ class HIL_Exo:
         candidate = raw_suggestion.flatten()
         R, L0 = candidate[0], candidate[1]
 
+        # ── Step 1: try BO's actual argmax ──
         is_safe, max_pf, df_torque, max_total = self._is_safe_candidate(
             R, L0, pf_zone, pf_threshold,
             df_min=df_min_bo, df_check_angle=df_angle,
@@ -355,9 +369,31 @@ class HIL_Exo:
             return raw_suggestion
 
         print(f"   ⚠️  BO suggestion R={R:.4f}, L0={L0:.4f} failed "
-              f"(PF={max_pf} Nm, DF={df_torque} Nm, max={max_total:.2f} Nm) — "
-              f"resampling...")
+              f"(PF={max_pf} Nm, DF={df_torque} Nm, max={max_total:.2f} Nm)")
+        print(f"   🔍 Searching top-K acquisition rankings on grid...")
 
+        # ── Step 2: top-K ranked fallback via acquisition function grid ──
+        try:
+            safe_candidate, rank, ei_val = self._top_k_safe_fallback(
+                pf_zone, pf_threshold, df_min_bo, df_angle, range_,
+            )
+            if safe_candidate is not None:
+                R, L0 = safe_candidate[0], safe_candidate[1]
+                _, max_pf, df_torque, max_total = self._is_safe_candidate(
+                    R, L0, pf_zone, pf_threshold,
+                    df_min=df_min_bo, df_check_angle=df_angle,
+                )
+                print(f"   ✅ Top-K safe fallback (rank #{rank}, EI={ei_val:.4f}): "
+                      f"R={R:.4f}, L0={L0:.4f} "
+                      f"(PF={max_pf:.2f} Nm, DF={df_torque:.2f} Nm, "
+                      f"max={max_total:.2f} Nm)")
+                return safe_candidate.reshape(1, n_parms)
+        except Exception as e:
+            print(f"   ⚠️  Top-K fallback failed ({type(e).__name__}: {e}) — "
+                  f"reverting to random sampling")
+
+        # ── Step 3: random sampling as final fallback (rarely reached) ──
+        print(f"   🎲 Random sampling fallback...")
         for attempt in range(500):
             candidate = np.random.uniform(range_[0], range_[1])
             R, L0 = candidate[0], candidate[1]
@@ -366,13 +402,91 @@ class HIL_Exo:
                 df_min=df_min_bo, df_check_angle=df_angle,
             )
             if is_safe:
-                print(f"   ✅ Safe replacement at attempt {attempt+1}: "
+                print(f"   ✅ Random replacement at attempt {attempt+1}: "
                       f"R={R:.4f}, L0={L0:.4f} (DF={df_torque:.2f} Nm)")
                 return candidate.reshape(1, n_parms)
 
-        print(f"   ⚠️  No safe replacement found after 500 attempts — "
-              f"using BO suggestion.")
+        print(f"   ⚠️  No safe replacement found after 500 random attempts — "
+              f"using original BO suggestion.")
         return raw_suggestion
+
+    def _top_k_safe_fallback(self,
+                              pf_zone: list, pf_threshold: float,
+                              df_min: float, df_angle: float,
+                              range_: np.ndarray,
+                              n_grid: int = 50,
+                              ):
+        """Walk down ranked acquisition function values, return first safe point.
+
+        Builds a `n_grid` × `n_grid` grid over the parameter space, evaluates
+        the GP's acquisition function (qNoisyExpectedImprovement) at every
+        grid point, sorts by EI value descending, and walks down the list
+        checking safety. Returns the first safe candidate.
+
+        Returns
+        -------
+        candidate : np.ndarray | None    safe (R, L0) point, or None if no
+                                          grid point is safe
+        rank      : int                   1-indexed rank in the EI ordering
+                                          (1 = highest EI safe point)
+        ei_val    : float                 acquisition value at returned point
+        """
+        import torch
+        from botorch.acquisition import qNoisyExpectedImprovement
+        from botorch.sampling import IIDNormalSampler
+
+        # Build a dense grid over the physical parameter space
+        n_parms = self.args["Optimization"]["n_parms"]
+        if n_parms != 2:
+            # Method as written assumes 2D — for higher dims, would need
+            # different sampling strategy
+            return None, 0, 0.0
+
+        R_vals = np.linspace(range_[0, 0], range_[1, 0], n_grid)
+        L0_vals = np.linspace(range_[0, 1], range_[1, 1], n_grid)
+        RR, LL = np.meshgrid(R_vals, L0_vals)
+        grid_phys = np.column_stack([RR.ravel(), LL.ravel()])
+
+        # Normalize to [0,1] for the GP
+        if self.NORMALIZATION:
+            grid_norm = self._normalize_x(grid_phys)
+            x_train_norm = self._normalize_x(self.x_opt)
+        else:
+            grid_norm = grid_phys
+            x_train_norm = self.x_opt
+
+        # Evaluate acquisition function at every grid point
+        sampler = IIDNormalSampler(sample_shape=torch.Size([200]), seed=1234)
+        x_train_tensor = torch.tensor(x_train_norm, dtype=torch.float64)
+        acq = qNoisyExpectedImprovement(self.BO.model, x_train_tensor,
+                                         sampler=sampler)
+
+        # Evaluate in batches (memory-friendly)
+        ei_values = np.zeros(len(grid_norm))
+        batch_size = 100
+        with torch.no_grad():
+            for start in range(0, len(grid_norm), batch_size):
+                end = min(start + batch_size, len(grid_norm))
+                x_batch = torch.tensor(grid_norm[start:end],
+                                        dtype=torch.float64).unsqueeze(1)
+                ei_values[start:end] = acq(x_batch).numpy()
+
+        # Sort grid points by EI, descending
+        ranked_indices = np.argsort(-ei_values)
+
+        # Walk down the ranking
+        for ranking, idx in enumerate(ranked_indices, start=1):
+            R_cand, L0_cand = grid_phys[idx]
+            is_safe, _, _, _ = self._is_safe_candidate(
+                R_cand, L0_cand, pf_zone, pf_threshold,
+                df_min=df_min, df_check_angle=df_angle,
+            )
+            if is_safe:
+                return grid_phys[idx], ranking, float(ei_values[idx])
+
+        # No safe point found in the entire grid (very unlikely)
+        return None, 0, 0.0
+
 
     # =======================================================================
     # Terminal mode (headless, prompts operator between trials)
