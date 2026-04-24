@@ -90,7 +90,8 @@ HITLO_Symmetry/
 ├── docs/                     # extended documentation
 │   ├── getting_started.md    # 10-minute setup + first run guide
 │   ├── workflow.md           # experiment-day procedure
-│   └── detection_pipeline.md # algorithm details + references
+│   ├── detection_pipeline.md # algorithm details + references
+│   └── porting_to_other_devices.md  # adapting to non-LegExoNET devices
 │
 └── tests/                    # unit tests (currently minimal)
 ```
@@ -129,6 +130,11 @@ singletons dropped; trial ends trimmed 3 seconds each way.
 
 Full methodology, physiologic justification, and literature references in
 [docs/detection_pipeline.md](docs/detection_pipeline.md).
+
+If you want to use this codebase for a **different exoskeleton or robotic
+device** (different mechanism, different parameters), see
+[docs/porting_to_other_devices.md](docs/porting_to_other_devices.md) for a
+walkthrough of what to change.
 
 ---
 
