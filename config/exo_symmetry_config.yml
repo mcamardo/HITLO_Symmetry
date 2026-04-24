@@ -1,0 +1,45 @@
+# ============================================================
+# CHANGE THESE TWO VALUES BETWEEN PARTICIPANTS/SESSIONS
+# ============================================================
+participant: &pid     "P048"
+session:     &ses     "S001"
+
+Subject:
+  id:       *pid
+  session:  *ses
+  base_dir: "/Users/maccamardo/HITLO"
+
+Cost:
+  sample_rate: 200
+  time: 90
+  signed: true          # true = signed symmetry (two shank sensors)
+                        # false = unsigned (single sternum sensor fallback)
+
+Optimization:
+  n_parms: 2
+  n_steps: 15
+  n_exploration: 5
+  range: [[0.24, 0.30], [0.35, 0.40]]
+  device: "cpu"
+  normalize: true
+  acquisition: 'ei'
+  kernel_function: 'se'
+  model_save_path: "auto"
+  result_save_path: "auto"
+
+  pf_zone_deg:         [2, 20.0]
+  pf_torque_threshold: 4.0
+  min_df_torque_nm:    20
+  df_check_angle_deg:  -10.0
+  df_min_bo_nm:        0
+
+  lambda_pf: 0
+  mu_df: 0
+
+Parameters:
+  R:
+    name: "Pulley Radius"
+    unit: "m"
+  L0:
+    name: "Spring Rest Length"
+    unit: "m"
