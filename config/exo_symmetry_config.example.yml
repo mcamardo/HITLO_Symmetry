@@ -18,14 +18,14 @@
 Subject:
   # Participant identifier (e.g. "P049"). Used in BIDS-style filenames:
   #   sub-{id}_ses-{session}_task-Default_run-{NN}_eeg.xdf
-  id: P000
+  id: P001
 
   # Session identifier — typically S001 for first visit, S002 for follow-up
   session: S001
 
   # Where data is saved. The full path becomes:
   #   {base_dir}/sub-{id}/ses-{session}/eeg/
-  base_dir: /Users/yourname/HITLO
+  base_dir: /Users/yourname/HITLO_Data
 
 
 # =============================================================================
@@ -34,7 +34,7 @@ Subject:
 
 sensors:
   # MAC address suffixes for your Polar H10s (find via `python apps/collect_sensors.py left`)
-  # You'll see scan output that lists discoverable Polar devices with their IDs.
+  # You'll see scan output that lists discoverable Polar devices with their IDs. (CHANGE THIS FOR YOUR SPECIFIC SENSORS)
   left_id:  "7F302C25"
   right_id: "80AE3629"
 
