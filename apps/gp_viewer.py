@@ -413,7 +413,7 @@ fig.update_layout(
                 zaxis_title='EI', camera=cam),
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 
 # ===========================================================================
@@ -429,7 +429,7 @@ with st.expander("📊 Trial data"):
         '|SI %|': np.abs(gp_data['asymmetry_points']),
         'signed SI %': gp_data['asymmetry_points'],
     })
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
 
 st.sidebar.markdown("---")

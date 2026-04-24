@@ -757,19 +757,19 @@ with st.sidebar:
         st.warning("⚠️ Checkpoint found!")
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("▶️ Resume", use_container_width=True, type="primary"):
+            if st.button("▶️ Resume", width="stretch", type="primary"):
                 ok, _ = initialize_system(fresh_start=False)
                 if ok:
                     st.success("✅ Resumed!")
                     st.rerun()
         with col_b:
-            if st.button("🆕 Fresh Start", use_container_width=True):
+            if st.button("🆕 Fresh Start", width="stretch"):
                 ok, _ = initialize_system(fresh_start=True)
                 if ok:
                     st.success("✅ Started fresh!")
                     st.rerun()
     else:
-        if st.button("🔄 Initialize/Reset System", use_container_width=True):
+        if st.button("🔄 Initialize/Reset System", width="stretch"):
             ok, _ = initialize_system(fresh_start=True)
             if ok:
                 st.success("✅ System initialized!")
@@ -795,7 +795,7 @@ with st.sidebar:
         """)
         st.markdown("---")
         if st.session_state.results:
-            if st.button("💾 Export Results", use_container_width=True):
+            if st.button("💾 Export Results", width="stretch"):
                 df = pd.DataFrame(st.session_state.results)
                 csv = df.to_csv(index=False)
                 st.download_button(label="Download CSV", data=csv,
@@ -836,7 +836,7 @@ def live_sensor_fragment():
                 st.success(f"✅ {side.capitalize()} connected  |  {n} samples")
                 fig = plot_live_sensor(store, f'polar accel {side}', sample_rate)
                 if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
                 else:
                     st.info(f"⏳ Collecting {side} data...")
             else:
@@ -881,11 +881,11 @@ if trial_num > n_steps:
         st.metric("Best L₀", f"{hil.x_opt[best_idx][1]:.4f}")
     st.markdown("---")
     if (fig := plot_progress()):
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     if (gp_fig := plot_gp_surface()):
-        st.plotly_chart(gp_fig, use_container_width=True)
+        st.plotly_chart(gp_fig, width="stretch")
     df = pd.DataFrame(st.session_state.results)
-    st.dataframe(df, use_container_width=True, height=400)
+    st.dataframe(df, width="stretch", height=400)
     st.stop()
 
 c1, c2 = st.columns([2, 1])
@@ -944,7 +944,7 @@ with c2:
 
 st.subheader("📈 Predicted Torque-Angle Curve")
 torque_fig = plot_torque_curve(R=params[0], L0=params[1])
-st.plotly_chart(torque_fig, use_container_width=True)
+st.plotly_chart(torque_fig, width="stretch")
 
 angles_check, torques_check = compute_torque_curve(params[0], params[1])
 pf_zone = st.session_state.config['Optimization'].get('pf_zone_deg', [2.0, 20.0])
@@ -998,11 +998,11 @@ with c1:
     else:
         st.warning(f"⏳ Waiting for: run-{trial_num:03d}.xdf")
 with c2:
-    if st.button("🔍 Check File", use_container_width=True):
+    if st.button("🔍 Check File", width="stretch"):
         st.rerun()
 with c3:
     if st.button("▶️ Analyze Trial", type="primary",
-                 use_container_width=True, disabled=not file_exists):
+                 width="stretch", disabled=not file_exists):
         with st.spinner("Analyzing trial..."):
             if analyze_current_trial():
                 st.success("✅ Trial analyzed!")
@@ -1056,7 +1056,7 @@ if st.session_state.results:
                 st.success("✅ All QC checks passed — detection looks clean.")
 
             if hs_fig is not None:
-                st.plotly_chart(hs_fig, use_container_width=True)
+                st.plotly_chart(hs_fig, width="stretch")
                 st.caption(
                     f"Detection: jerk z-score → cluster-keep-last → stance "
                     f"confirmation → {trim_s:.1f}s trim (gray shade). Each "
@@ -1065,12 +1065,12 @@ if st.session_state.results:
                     f"(stance). Same pipeline as the BO cost.")
 
     if (fig := plot_progress()):
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     if len(st.session_state.results) > n_exploration:
         st.subheader("🧠 GP Predicted Cost Surface")
         if (gp_fig := plot_gp_surface()):
-            st.plotly_chart(gp_fig, use_container_width=True)
+            st.plotly_chart(gp_fig, width="stretch")
 
     st.subheader("📋 Trial History")
     df = pd.DataFrame(st.session_state.results)
@@ -1080,7 +1080,7 @@ if st.session_state.results:
     df_display['cost'] = df_display['cost'].map('{:.4f}'.format)
     df_display['best'] = df_display['is_best'].map(lambda x: '⭐' if x else '')
     df_display = df_display[['trial', 'R', 'L0', 'cost', 'phase', 'best']]
-    st.dataframe(df_display, use_container_width=True, height=300)
+    st.dataframe(df_display, width="stretch", height=300)
 
 st.markdown("---")
 st.caption("HITLO_Symmetry v2.0.0 | Built on HIL_toolkit (Kim lab)")
