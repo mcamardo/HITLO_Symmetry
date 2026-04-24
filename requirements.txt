@@ -1,0 +1,24 @@
+# HITLO Python dependencies
+#
+# NOTE: HIL_toolkit is a separate install — see README for instructions:
+#   git clone https://github.com/UICRRL/HIL_toolkit.git
+#   cd HIL_toolkit && pip install -e .
+# HIL_toolkit installs its own BO stack (torch/gpytorch/botorch).
+
+# Core scientific stack
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.7
+pyyaml>=6.0
+
+# LSL / XDF (sensor data)
+pyxdf>=1.16
+pylsl>=1.16
+
+# Streamlit UI
+streamlit>=1.30
+plotly>=5.17
+
+# Testing
+pytest>=7.4

@@ -1,0 +1,480 @@
+# Heel-strike detection pipeline
+
+This document describes the algorithm HITLO_Symmetry uses to detect heel
+strikes from shank-mounted IMU signals. It covers the physiologic
+justification, each processing stage, the rationale for every threshold, and
+the literature that motivated the design choices.
+
+---
+
+## TL;DR
+
+We detect heel strikes in bilateral shank IMU signals using a physics-based
+multi-stage pipeline:
+
+```
+raw tri-axial accel
+   → magnitude |a|
+   → jerk = |d|a|/dt|
+   → 15 Hz lowpass Butterworth, order 4, filtfilt (zero phase delay)
+   → z-score normalization
+   → strict peak detection (0.7 SD jerk)
+   → gap-fill recovery (1.8 SD in anomalously long gaps)
+   → cluster candidates (peaks within 0.65 s)
+   → within each cluster: scan last-to-first, accept the first peak that is
+      (a) above gravity baseline AND
+      (b) followed by a stance region (post-peak window near baseline)
+   → drop singleton clusters at trial edges
+   → trim 3 s from each end
+   → filter physiologically-implausible strides (< 0.3 s or > 3.0 s)
+```
+
+The result is a timestamped list of heel-strike events per leg, from which
+step times and the gait symmetry index are computed.
+
+---
+
+## Why this matters
+
+For a passive ankle exoskeleton optimizer targeting **step-time symmetry** as
+its cost, heel-strike detection is the most critical component. Every timing
+measurement downstream, every symmetry index, every Bayesian optimization
+suggestion — all of it flows from the list of detected events.
+
+Detection errors have directional consequences:
+
+| Error type | Effect on symmetry index |
+|---|---|
+| False positive (extra heel strike) | Creates a fake short step, biases SI |
+| False negative (missed heel strike) | Merges two real strides into one long one |
+| Temporal jitter (ms-scale timing error) | Adds noise to step times |
+| Wrong-foot label | Catastrophic — inverts the signed SI |
+
+For stroke rehab where the true symmetry may be 15-25%, a detection bias of a
+few percent can swamp the signal. **The pipeline's job is to get detection
+right, not fast.** We willingly trade compute for specificity.
+
+---
+
+## Physiologic foundation
+
+The entire algorithm rests on two observations about what heel strike
+actually *is* mechanically.
+
+### Observation 1: heel strike is an impact
+
+When the foot makes contact with the ground, the shank decelerates suddenly.
+The IMU, rigidly coupled to the shank, records a transient acceleration
+spike that is large compared to both (a) gravity alone and (b) the
+accelerations of swing phase.
+
+Because the shank is moving through 3D space during gait (swinging forward,
+rotating), we use the **tri-axial magnitude** `|a| = √(x² + y² + z²)` rather
+than any single axis. Magnitude is invariant to sensor orientation on the
+shank, which matters in our setup because Coban wrapping doesn't guarantee a
+perfectly consistent mounting between sessions.
+
+Quantitatively: `|a|` during stance ≈ 1 g (gravity alone, since the shank
+is quasi-stationary). Impact spikes during heel strike reach 2–5 g typically
+for walking speeds around 0.8–1.3 m/s.
+
+### Observation 2: stance produces a quasi-stationary shank
+
+Immediately after heel strike, the foot is planted and bears the body's
+weight. The shank is rotating slowly if at all (mid-stance it is nearly
+vertical and essentially static). The accelerometer reads mostly gravity.
+
+Therefore, in the 100–300 ms after a true heel strike, the magnitude signal
+should be close to its baseline value (≈ 1 g). Any candidate peak *not*
+followed by such a quasi-static window is, by physiology, not a heel strike.
+
+These two observations — *heel strike is an impact above baseline* and
+*heel strike is followed by quasi-stationary stance* — are the two filters
+that distinguish real heel strikes from other jerk peaks in the gait cycle
+(toe-off, mid-swing transients, etc.).
+
+---
+
+## Pipeline stages
+
+### Stage 1 — Compute tri-axial magnitude
+
+```python
+magnitude = √(x² + y² + z²)
+```
+
+**Why magnitude and not a single axis?** Three reasons:
+
+1. **Orientation invariance.** If the Coban wrap shifts between trials and
+   the x/y/z axes rotate relative to the shank, magnitude is unchanged.
+2. **Sensitivity.** Heel-strike energy distributes across all three axes
+   depending on shank angle, walking speed, and stride mechanics. Projecting
+   to any single axis throws away information.
+3. **Physical interpretability.** `|a|` near baseline = quasi-stationary;
+   `|a|` spiking = impact. This lets us write physiology-grounded thresholds.
+
+### Stage 2 — Jerk transform + lowpass + z-score
+
+#### Jerk
+
+```python
+jerk = |d|a|/dt|
+```
+
+**Why jerk (rate of change of magnitude) instead of raw magnitude?** Jerk
+emphasizes *sudden transitions* and suppresses slow ones:
+
+- Heel strike: sharp transition from swing (changing `|a|`) to stance
+  (flat `|a|`) — produces a huge jerk spike
+- Gravity reorientation during swing: slow change in `|a|` — small jerk
+- Baseline drift, sensor warming: very slow — essentially no jerk
+
+Using jerk rather than raw magnitude makes the detector look for *events*
+(brief, localized changes) rather than *levels* (absolute amplitudes),
+which is exactly what we want for timing individual heel strikes.
+
+Voisard et al. (2024, *J NeuroEng Rehabil* 21:104) demonstrated this
+approach on an IMU-based gait event detector for shank-mounted sensors and
+used a 14 Hz lowpass; Prasanth et al. (2021, *Sensors*) review similar
+rule-based detection approaches.
+
+#### Lowpass filter
+
+```python
+b, a = butter(4, 15 Hz / Nyquist, btype='low')
+jerk_smooth = filtfilt(b, a, jerk)
+```
+
+**Why 15 Hz cutoff?** Gait-cycle fundamental frequencies are around 1 Hz
+(stride rate) with harmonics out to ~10 Hz. Heel-strike impact energy
+concentrates around 5–15 Hz. Above that range, you're capturing sensor
+electronics noise, BLE packet jitter, Coban micro-vibrations, and soft-tissue
+ringing after impact — none of which represent the gait event itself.
+
+**Why Butterworth?** Butterworth filters have a maximally flat passband (no
+ripple), preserving the heel-strike peak shape faithfully. Alternatives
+like Chebyshev would give sharper rolloff but introduce ripples that distort
+the impact shape.
+
+**Why order 4?** Each order roughly doubles the rolloff rate (order 4 is
+~24 dB/octave, which means frequencies above 15 Hz are suppressed by at
+least a factor of 16 per doubling). Order 2 is too gentle; order 8+ risks
+numerical instability and transient ringing. Order 4 is the biomechanics
+standard.
+
+**Why filtfilt (not filter)?** A normal IIR filter introduces a frequency-
+dependent phase delay — filtered peaks land slightly *after* raw peaks.
+Since we're doing timing-based analysis (step times in milliseconds), delay
+is unacceptable. `filtfilt` runs the filter forward then backward,
+canceling the delay exactly. The result is zero-phase; the effective order
+doubles (so our order-4 gives order-8 rolloff magnitude-wise), which is a
+bonus.
+
+#### Z-score normalization
+
+```python
+jerk_z = (jerk_smooth - mean) / std
+```
+
+**Why z-score?** Thresholds expressed in units of standard deviations above
+the noise floor are portable across sessions, sensors, and subjects. A 0.7
+SD peak is always meaningful regardless of absolute jerk magnitude, which
+varies with participant (stride impact force) and hardware (sensor
+calibration drift).
+
+This is mathematically equivalent to an adaptive threshold that
+auto-calibrates to each trial's baseline noise level.
+
+### Stage 3 — Two-pass peak detection
+
+Peak detection on the z-scored jerk signal proceeds in two passes.
+
+#### Pass 1 (strict)
+
+```python
+strict_peaks = find_peaks(jerk_z, height=0.7, distance=20 samples)
+```
+
+Finds all local maxima above 0.7 standard deviations of jerk, separated by
+at least 100 ms.
+
+**Why 0.7 SD (and not 2.5 SD as in earlier versions)?** We *want* to cast a
+wide net here. False positives are tolerable because the cluster-keep-last
+stage later will filter them out physiologically. False negatives are
+expensive because every missed heel strike distorts the step-time pattern.
+Strategy: *over-detect now, filter aggressively later.*
+
+**Why distance=100 ms?** No real human walking stride produces two heel
+strikes less than 100 ms apart. This prevents the peak detector from double-
+counting a single peak that has a small notch at its apex.
+
+#### Pass 2 (gap-fill recovery)
+
+After strict detection, we compute the median interval between detected
+peaks. If we observe a gap that is greater than 1.7× the median, there
+probably was a real heel strike in that window whose jerk happened to fall
+below the strict threshold. We search that window with a higher-threshold
+fallback:
+
+```python
+recovered = find_peaks(jerk_z[gap_start:gap_end],
+                       height=1.8, distance=20 samples)
+```
+
+If nothing above 1.8 SD exists in the gap, we leave it alone. We do **not
+interpolate** or fabricate events — only evidence-based detection.
+
+**Why 1.7× median?** In rhythmic walking, stride-to-stride variation is
+typically <10–15%. A gap 70% longer than median is a strong anomaly signal.
+
+**Why 1.8 SD recovery threshold?** Higher than the strict pass (0.7 SD)
+because we're already committing a lower specificity by looking in
+anomalously long gaps — we want high confidence that any recovered peak
+is genuine.
+
+**Why not just interpolate?** An older pipeline version fabricated events
+at the midpoint of long gaps. This was bug-bait: fabricated events create
+*perfectly symmetric* fake step times (midpoint → equal halves), which
+artificially pulls the symmetry index toward zero. For an optimizer trying
+to minimize symmetry, that's catastrophic — it would converge toward
+parameter settings that *cause* detection failures rather than improve
+gait.
+
+### Stage 4 — Cluster candidates
+
+After the two passes, we have a list of candidate peaks with high
+sensitivity (very few real heel strikes missed) and low specificity (many
+other gait events also present — toe-off, mid-swing transients, post-impact
+tissue ringing).
+
+The cluster stage exploits the physiology: **one gait cycle = one heel
+strike, but many jerk peaks.** Group peaks that are within 0.65 s of a
+neighbor into clusters.
+
+**Why 0.65 s?** Shorter than a full stride (~1.0–1.5 s) but longer than the
+active-events duration within a single cycle (~0.3–0.5 s). Peaks from the
+same cycle cluster together; peaks from consecutive cycles stay separate.
+
+### Stage 5 — The two physiologic filters
+
+Within each cluster, scan from the **last peak backwards**. The first peak
+that satisfies both conditions below is the heel strike; all others in the
+cluster are rejected.
+
+#### Filter A: Above baseline
+
+```python
+baseline = median(|a|)             # ≈ 1 g across the whole trial
+if magnitude[peak_index] < baseline:
+    skip this peak
+```
+
+**Why:** During mid-swing, the shank can briefly enter near-free-fall
+(acceleration magnitude drops well below gravity). The rapid transition
+into and out of that trough produces jerk peaks. But these are physics
+artifacts, not impacts. A real heel strike has `|a|` *above* baseline.
+
+Using the trial's median `|a|` as baseline is robust to outliers: impact
+spikes and occasional gravity-aligned stance phases don't distort the
+central value.
+
+#### Filter B: Followed by stance
+
+```python
+post_peak_window = magnitude[peak_index + 0.10 s : peak_index + 0.30 s]
+mad = mean(|post_peak_window - baseline|)
+if mad > 0.15 × baseline:
+    skip this peak
+```
+
+**Why:** A real heel strike is *immediately followed by stance*: the foot is
+planted, the shank is quasi-stationary, and the accelerometer reads mostly
+gravity. In a 200 ms window starting 100 ms after peak (skipping impact
+ring-down), the magnitude should stay close to baseline.
+
+We compute mean absolute deviation (MAD) from baseline across that window.
+If MAD exceeds 15% of baseline (~150 mg on a 1000 mg baseline), the shank
+is *still moving* — this was not a heel strike, it was probably a toe-off
+or a mid-swing transient. Reject.
+
+**Why MAD and not peak-to-peak or std?** MAD is robust:
+
+- Peak-to-peak would flag a stance window because of one stray sample
+- std is sensitive to the tails of the distribution
+- MAD averages "how far from baseline" across the window, which is exactly
+  what the physiologic question is asking
+
+**Why 15% tolerance (not tighter)?** Stroke gait in particular has
+compensatory strategies during stance (small lateral adjustments, postural
+reactions) that produce modest but real variability. 15% captures the
+"essentially stationary" regime while tolerating normal gait-by-gait
+variation.
+
+#### Why scan last-to-first?
+
+Within one gait cycle, the event sequence is:
+
+```
+heel-off → toe-off → (swing, possible transients) → heel-strike → stance
+```
+
+Only heel-strike is followed by stance. Everything earlier in the cycle
+has more motion following (swing continuing). So the natural rule is:
+walk backwards from the last peak in the cluster; the first one that
+passes both filters is heel-strike.
+
+If no peak in a cluster passes both filters, the cluster emits no event.
+We never fabricate. (This can happen if a cluster caught the start of a
+partial cycle at the trial edge, or in cases of extreme gait irregularity.)
+
+### Stage 6 — Edge-singleton rejection
+
+Singletons at the first and last cluster of a trial are often partial
+cycles — the subject started or stopped walking mid-stride, or the trial
+boundary clipped the signal. Their timing is unreliable. We drop them.
+
+Singletons in the middle of the trial are usually real: they pass both
+physiologic filters, and we keep them.
+
+### Stage 7 — Steady-state trim
+
+```python
+drop any heel strike within 3 s of trial start or end
+```
+
+**Why:** Ramp-up (starting from standstill) and ramp-down (decelerating to
+stop) produce systematically different shank mechanics than steady-state
+walking. Weaker impacts, asymmetric timing, non-representative gait. This
+biases the symmetry estimate toward whatever asymmetry the participant
+naturally exhibits during start/stop — which is different from their
+steady-state walking pattern that the exoskeleton is trying to optimize.
+
+Standard practice in gait literature is 3–5 s trim; we use 3 s.
+
+### Stage 8 — Physiologic plausibility filter
+
+```python
+if interval < 0.3 s:     # faster than any real stride
+    drop the later heel strike
+if interval > 3.0 s:     # slower than any continuous walking
+    flag as possible missed detection
+```
+
+Remaining heel strikes are paired across L/R to produce step times.
+
+### Stage 9 — Symmetry index
+
+For each left/right heel-strike pair:
+
+```
+Right step = time from LEFT heel strike to next RIGHT heel strike
+Left step  = time from RIGHT heel strike to next LEFT heel strike
+
+per-stride SI = 2 × (right_step - left_step) / (right_step + left_step) × 100 %
+```
+
+Aggregate: mean per-stride SI (signed) across all stride pairs.
+
+**Interpretation:**
+
+| SI | Meaning |
+|---|---|
+| SI = 0 | Perfectly symmetric |
+| SI > 0 | Right step longer → left leg is support-dominant |
+| SI < 0 | Left step longer → right leg is support-dominant |
+| &#124;SI&#124; < 2% | Near-symmetric (healthy young adult typical) |
+| 2–10% | Mild asymmetry |
+| 10–20% | Moderate asymmetry |
+| > 20% | Severe asymmetry (often chronic stroke) |
+
+The **signed** SI is what we use as the BO cost, because we want the
+optimizer to converge to zero (true symmetry). Unsigned SI would allow
+the optimizer to get stuck at any point where |asymmetry| = target
+regardless of direction, which is not the clinical goal.
+
+---
+
+## Why NOT other approaches
+
+### Why not train an ML classifier?
+
+A deep learning model on shank IMU data could outperform rule-based detection
+if given enough training data. For a single-institution preliminary study
+with ~20 subjects, it is not feasible to collect enough labeled data to
+outperform a well-tuned rule-based detector, especially because stroke gait
+presentations are heterogeneous.
+
+Rule-based detection has the additional benefit of being
+**physiologically interpretable** — every threshold corresponds to a
+physical quantity (impact, stance, stride rate). Reviewers, clinicians,
+and future students can understand and tune it without ML background.
+
+### Why not template matching / DTW?
+
+Template methods (e.g. Trojaniello et al. 2014) work well on rhythmic
+healthy gait but degrade with the high stride-to-stride variability of
+stroke gait. Rule-based detection with physiologic filters handles
+irregular gait more gracefully.
+
+### Why not raw accelerometer peak detection (like the old sternum pipeline)?
+
+Previous work in our lab used a single sternum-mounted sensor with peak
+detection on the forward-aft axis and an assumed left-right peak
+alternation. This approach has three fundamental limitations:
+
+1. **Cannot distinguish L from R.** With one sensor at midline, there is
+   no signal difference between left and right heel strikes. The pipeline
+   assumes alternation, which fails for irregular gait or missed events.
+2. **Uses a weak threshold** (signal mean). Catches arm-swing and torso
+   rotation artifacts.
+3. **Fabricates missing events.** The "halve long intervals" rule
+   artificially improves the symmetry index by construction — a critical
+   flaw for an optimizer targeting symmetry.
+
+The current two-sensor shank-mounted pipeline directly addresses all three
+limitations.
+
+---
+
+## Validation
+
+The pipeline was validated on participant P048 (healthy, voluntarily
+asymmetric gait) across 7 trials. On run-007 (volitional right-step-longer
+walk), the pipeline detected:
+
+- LEFT sensor: 60 candidates → 22 heel strikes (after cluster + filter)
+- RIGHT sensor: 66 candidates → 22 heel strikes
+- After 3 s trim: 18 + 18 heel strikes
+- 17 left steps + 17 right steps
+- Right step mean: 0.981 s; Left step mean: 0.845 s
+- **SI = +14.33%** (right step 14% longer, matching participant intent)
+
+The v2.0.0 refactored library reproduces v1.8.0 output bit-identically
+(0.000000 cost difference) on this validation trial.
+
+---
+
+## References
+
+Voisard C et al. (2024). Automatic gait events detection with inertial
+measurement units: healthy subjects and moderate to severe impaired
+patients. *Journal of NeuroEngineering and Rehabilitation* 21:104.
+
+Prasanth H et al. (2021). Wearable sensor-based real-time gait detection:
+a systematic review. *Sensors* 21(8): 2727.
+
+Trojaniello D et al. (2014). Accuracy, sensitivity and robustness of five
+different methods for the estimation of gait temporal parameters using a
+single inertial sensor mounted on the lower trunk. *Journal of
+NeuroEngineering and Rehabilitation* 11: 152.
+
+Patterson KK et al. (2010). Evaluation of gait symmetry after stroke:
+a comparison of current methods and recommendations for standardization.
+*Gait & Posture* 31(2): 241-246.
+
+Kim M et al. (2017). Human-in-the-loop Bayesian optimization of wearable
+device parameters. *PLoS ONE* 12(9): e0184054.
+
+Ding Y, Kim M, Kuindersma S, Walsh CJ (2018). Human-in-the-loop
+optimization of hip assistance with a soft exosuit during walking.
+*Science Robotics* 3(15): eaar5438.

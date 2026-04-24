@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Data — never commit subject data
+data/
+*.xdf
+*.xdf.old
+sub-*/
+derivatives/
+
+# Results & generated plots
+*.png
+*.pdf
+plots/
+results/
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+build/
+dist/
+*.egg
