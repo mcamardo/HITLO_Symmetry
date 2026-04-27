@@ -7,7 +7,6 @@ shank-mounted IMU gait symmetry as the cost signal — developed for post-stroke
 gait rehabilitation.
 
 **Platform:** LegExoNET passive ankle exoskeleton
-**Target population:** Post-stroke individuals with asymmetric gait
 **Sensors:** Two Polar H10 accelerometers, shank-mounted bilaterally
 
 ---
@@ -22,8 +21,8 @@ acquisition) and Polar H10 BLE streaming utilities.
 **HITLO_Symmetry contributes on top of that foundation:**
 - Custom cost function based on step-time symmetry (not metabolic cost)
 - Two-sensor shank-mounted IMU heel-strike detection pipeline
-- Streamlit experimenter UI with live QC
-- Exoskeleton-specific spring penalty
+- Streamlit experimenter UI
+- Exoskeleton-specific spring penalty adn safety constraints
 
 ---
 
@@ -109,7 +108,7 @@ stream acceleration over Bluetooth (via LSL). After the trial,
 1. Loads the XDF recording (via `hitlo.io`)
 2. Runs the detection pipeline on each shank signal (`hitlo.detection`)
 3. Interleaves left/right heel strikes → step times → symmetry index (`hitlo.symmetry`)
-4. Adds a spring-shape penalty (prefers dorsiflexion-assist spring profiles)
+4. Adds a spring-shape penalty (prefers dorsiflexion-assist spring profiles) THESE VALUES ARE SET TO ZERO FOR ME!
 5. Returns the total cost
 
 The GP-based BO picks the next suggestion to minimize this cost.
@@ -143,7 +142,7 @@ walkthrough of what to change.
 - **v2.0.0** (current, this repo) — refactored into library structure; detection
   logic consolidated into `hitlo.detection` as single source of truth
 - **v1.8.0** — flat-file layout; cluster-keep-last added to `symmetry_cost.py`
-- **v1.7.2** — LSL timestamp fix (critical for two-sensor drift)
+- **v1.7.2** — LSL timestamp fix (two-sensor drift)
 - **v1.6.0** — jerk-based detection replaces magnitude-peak detection
 
 ---
@@ -154,7 +153,7 @@ walkthrough of what to change.
 - 2× Polar H10 chest straps → worn on shanks with Coban wrap
 - Mac laptop with LabRecorder, LSL, Python 3.9+
 
-Sensor IDs:
+Sensor IDs (THESE WILL CHANGE DEPEDNING ON SENSOR USED:
 - Left shank: `7F302C25`
 - Right shank: `80AE3629`
 
@@ -162,8 +161,8 @@ Sensor IDs:
 
 ## Authors
 
-- **Mac Camardo** — PhD candidate, UIC Biomedical Engineering /
-  Shirley Ryan AbilityLab. [camardo2@uic.edu](mailto:camardo2@uic.edu)
+- **Mac Camardo** — PhD Student, UIC Biomedical Engineering /
+  Shirley Ryan AbilityLab. [marcc2@uic.edu](mailto:marcc2@uic.edu)
 - **Dr. James Patton** (sponsor) — UIC BME / Shirley Ryan AbilityLab
 - **Dr. Myunghee Kim** (co-sponsor) — UIC BME, author of HIL_toolkit
 
@@ -172,22 +171,7 @@ Sensor IDs:
 ## Citation
 
 If you use this code, please cite both the HITLO_Symmetry method paper (in prep)
-and the underlying HIL_toolkit:
-
-**HITLO_Symmetry:**
-> Camardo M, Kim M, Patton J. (in prep) Human-in-the-loop Bayesian
-> optimization of a passive ankle exoskeleton for post-stroke gait
-> symmetry rehabilitation.
-
-**HIL_toolkit / BO methodology:**
-> Kim M, Ding Y, Malcolm P, Speeckaert J, Siviy CJ, Walsh CJ, Kuindersma S.
-> (2017) Human-in-the-loop Bayesian optimization of wearable device
-> parameters. PLoS ONE 12(9): e0184054.
-
-> Ding Y, Kim M, Kuindersma S, Walsh CJ. (2018) Human-in-the-loop
-> optimization of hip assistance with a soft exosuit during walking.
-> Science Robotics 3(15): eaar5438.
-
+and the underlying HIL_toolkit
 ---
 
 ## License
