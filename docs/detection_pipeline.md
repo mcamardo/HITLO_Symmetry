@@ -460,21 +460,3 @@ Voisard C et al. (2024). Automatic gait events detection with inertial
 measurement units: healthy subjects and moderate to severe impaired
 patients. *Journal of NeuroEngineering and Rehabilitation* 21:104.
 
-Prasanth H et al. (2021). Wearable sensor-based real-time gait detection:
-a systematic review. *Sensors* 21(8): 2727.
-
-Trojaniello D et al. (2014). Accuracy, sensitivity and robustness of five
-different methods for the estimation of gait temporal parameters using a
-single inertial sensor mounted on the lower trunk. *Journal of
-NeuroEngineering and Rehabilitation* 11: 152.
-
-Patterson KK et al. (2010). Evaluation of gait symmetry after stroke:
-a comparison of current methods and recommendations for standardization.
-*Gait & Posture* 31(2): 241-246.
-
-Kim M et al. (2017). Human-in-the-loop Bayesian optimization of wearable
-device parameters. *PLoS ONE* 12(9): e0184054.
-
-Ding Y, Kim M, Kuindersma S, Walsh CJ (2018). Human-in-the-loop
-optimization of hip assistance with a soft exosuit during walking.
-*Science Robotics* 3(15): eaar5438.
