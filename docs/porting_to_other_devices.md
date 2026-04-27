@@ -15,11 +15,11 @@ Is your device an ankle exoskeleton with the same spring-pulley mechanism?
 │
 └── NO ─→ Same number of parameters, different physics?
          │
-         ├── YES → Port Level 2 (1-2 hours): swap the physics function
+         ├── YES → Port Level 2: swap the physics function
          │
          └── NO ─→ Different number/names of parameters?
                   │
-                  └── YES → Port Level 3 (3-5 hours): generalize the
+                  └── YES → Port Level 3: generalize the
                             parameter handling
 ```
 
