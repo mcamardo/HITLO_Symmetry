@@ -5,7 +5,7 @@ This is the step-by-step procedure for running a HITLO session.
 ## Before the participant arrives
 
 1. **Charge both Polar H10 sensors** overnight.
-2. **Apply the Coban wrap** to the right sensor (wraps around the shank for reliable skin contact). The right sensor has less surface area against the skin and needs this.
+2. **Apply the Coban wrap** to the right sensor (wraps around the shank for reliable skin contact).
 3. **Verify sensor IDs in config**:
    ```yaml
    # config/exo_symmetry_config.yml
@@ -58,15 +58,11 @@ For each trial:
 1. UI shows the next `(R, L₀)` to set. **Read these carefully** — they're in meters.
 2. Physically adjust the exoskeleton to those values.
 3. In LabRecorder, click **Start**.
-4. Participant walks for the trial duration (60 s default).
+4. Participant walks for the trial duration (90 s default).
 5. Click **Stop** in LabRecorder.
 6. Click **Analyze Trial** in the UI.
 7. Review the QC plot. If warnings appear (red 🚨 banners), pause and investigate before accepting the trial.
 8. The BO will automatically suggest the next `(R, L₀)`.
-
-## Between trials
-
-Give the participant 30-60 seconds of rest. For older or more fatigued participants, allow longer.
 
 ## End of session
 
