@@ -80,7 +80,7 @@ class DetectionConfig:
 
     # Jerk signal preparation — 45 Hz keeps the impact band (5–30 Hz) intact
     # while removing high-frequency sensor noise.
-    smooth_cutoff_hz: float = 45.0
+    smooth_cutoff_hz: float = 50.0
 
     # Peak detection thresholds (in units of jerk z-score standard deviations)
     strict_thresh: float = 0.7      # primary pass: catches most events
@@ -89,11 +89,11 @@ class DetectionConfig:
     min_peak_dist_s: float = 0.10   # minimum separation between candidate peaks
 
     # Cluster-keep-last
-    cluster_gap_s: float = 0.65     # peaks within this gap = same cluster
+    cluster_gap_s: float = 0.5     # peaks within this gap = same cluster
 
     # Stance confirmation (post-peak window)
     stance_buffer_s: float = 0.10       # skip this much after peak (impact decay)
-    stance_duration_s: float = 0.20     # window length to check
+    stance_duration_s: float = 0.2    # window length to check
     stance_tolerance_pct: float = 0.15  # mean abs deviation from baseline /
                                         #   baseline must be < this (e.g. 0.15 = 15%)
 
