@@ -34,12 +34,12 @@ We filter |a| BEFORE differentiating (textbook ordering). Differentiation
 amplifies high-frequency noise, so removing the noise first yields a
 cleaner derivative.
 
-The cutoff (45 Hz) sits well above the spectral content of heel-strike
+The cutoff (50 Hz) sits well above the spectral content of heel-strike
 impacts (~5–30 Hz), so the lowpass acts as light noise cleanup rather
 than active signal shaping. At cutoffs near the impact band (e.g. 15 Hz),
 filtering distorts the impact peak and degrades detection — empirically
 validated on P048 run-007: 15 Hz filter-then-diff dropped real heel
-strikes and doubled per-stride SI variance, while 45 Hz preserves impact
+strikes and doubled per-stride SI variance, while 50 Hz preserves impact
 fidelity (raw |a| and filtered |a| overlap through the impact peak).
 
 NOTE ON CAUSALITY
@@ -78,7 +78,7 @@ class DetectionConfig:
     # Sample rate (Polar H10)
     fs: int = 200
 
-    # Jerk signal preparation — 45 Hz keeps the impact band (5–30 Hz) intact
+    # Jerk signal preparation — 50 Hz keeps the impact band (5–30 Hz) intact
     # while removing high-frequency sensor noise.
     smooth_cutoff_hz: float = 50.0
 
@@ -89,11 +89,14 @@ class DetectionConfig:
     min_peak_dist_s: float = 0.10   # minimum separation between candidate peaks
 
     # Cluster-keep-last
-    cluster_gap_s: float = 0.5     # peaks within this gap = same cluster
+    cluster_gap_s: float = 0.5      # peaks within this gap = same cluster
+                                    # (0.5s prevents merging consecutive heel
+                                    # strikes at higher cadences while still
+                                    # capturing heel-strike + post-impact peaks)
 
     # Stance confirmation (post-peak window)
     stance_buffer_s: float = 0.10       # skip this much after peak (impact decay)
-    stance_duration_s: float = 0.2    # window length to check
+    stance_duration_s: float = 0.2      # window length to check
     stance_tolerance_pct: float = 0.15  # mean abs deviation from baseline /
                                         #   baseline must be < this (e.g. 0.15 = 15%)
 
@@ -143,7 +146,7 @@ def compute_jerk_z(accel_data: np.ndarray,
     decelerates abruptly at impact; toe-off and slow gravity-reorientation
     produce smaller jerk responses.
 
-    The lowpass is a 4th-order Butterworth at 45 Hz (default), applied with
+    The lowpass is a 4th-order Butterworth at 50 Hz (default), applied with
     filtfilt → zero phase delay so detected peaks aren't time-shifted. The
     cutoff sits well above heel-strike impact content (5–30 Hz), so the
     filter does light noise cleanup rather than reshaping the impact.
