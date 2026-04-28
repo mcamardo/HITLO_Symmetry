@@ -22,7 +22,7 @@ acquisition) and Polar H10 BLE streaming utilities.
 - Custom cost function based on step-time symmetry (not metabolic cost)
 - Two-sensor shank-mounted IMU heel-strike detection pipeline
 - Streamlit experimenter UI
-- Exoskeleton-specific spring penalty adn safety constraints
+- Exoskeleton-specific spring penalty and safety constraints
 
 ---
 
@@ -36,7 +36,7 @@ pip install -e .
 cd ..
 
 # 2. Clone and install HITLO_Symmetry
-git clone https://github.com/<your-username>/HITLO_Symmetry.git
+git clone https://github.com/mcamardo/HITLO_Symmetry.git
 cd HITLO_Symmetry
 pip install -r requirements.txt
 ```
@@ -67,32 +67,34 @@ See [docs/workflow.md](docs/workflow.md) for the full experiment-day procedure.
 
 ```
 HITLO_Symmetry/
-├── hitlo/                    # core library (import this)
-│   ├── detection.py          # heel-strike detection pipeline
-│   ├── symmetry.py           # step-time interleaving + SI computation
-│   ├── cost.py               # BO cost function (SymmetryCost class)
-│   ├── io.py                 # XDF loading, trial-file naming
-│   └── hil_exo.py            # HIL_Exo experiment driver (wraps HIL_toolkit's BO)
+├── hitlo/                         # core library (import this)
+│   ├── detection.py               # heel-strike detection pipeline
+│   ├── symmetry.py                # step-time interleaving + SI computation
+│   ├── cost.py                    # BO cost function (SymmetryCost class)
+│   ├── io.py                      # XDF loading, trial-file naming
+│   └── hil_exo.py                 # HIL_Exo experiment driver (wraps HIL_toolkit's BO)
 │
-├── apps/                     # user-facing tools
-│   ├── run_experiment.py     # Streamlit UI for live BO trials
-│   ├── diagnose_trial.py     # standalone trial QC plotter
-│   ├── gp_viewer.py          # interactive GP surface viewer (post-hoc)
-│   └── collect_sensors.py    # BLE sensor startup script
+├── apps/                          # user-facing tools
+│   ├── run_experiment.py          # Streamlit UI for live BO trials
+│   ├── diagnose_trial.py          # standalone trial QC plotter
+│   ├── compare_filter_order.py    # filter-ordering validation diagnostic
+│   ├── explainer.py               # 7-panel pipeline-explainer figure
+│   ├── gp_viewer.py               # interactive GP surface viewer (post-hoc)
+│   └── collect_sensors.py         # BLE sensor startup script
 │
-├── scripts/                  # batch / dev utilities
-│   └── analyze_experiment.py # full post-hoc session analysis
+├── scripts/                       # batch / dev utilities
+│   └── analyze_experiment.py      # full post-hoc session analysis
 │
 ├── config/
 │   └── exo_symmetry_config.example.yml  # template — copy to exo_symmetry_config.yml
 │
-├── docs/                     # extended documentation
-│   ├── getting_started.md    # 10-minute setup + first run guide
-│   ├── workflow.md           # experiment-day procedure
-│   ├── detection_pipeline.md # algorithm details + references
+├── docs/                          # extended documentation
+│   ├── getting_started.md         # 10-minute setup + first run guide
+│   ├── workflow.md                # experiment-day procedure
+│   ├── detection_pipeline.md      # algorithm details + references
 │   └── porting_to_other_devices.md  # adapting to non-LegExoNET devices
 │
-└── tests/                    # unit tests (currently minimal)
+└── tests/                         # unit tests (currently minimal)
 ```
 
 ---
@@ -108,7 +110,7 @@ stream acceleration over Bluetooth (via LSL). After the trial,
 1. Loads the XDF recording (via `hitlo.io`)
 2. Runs the detection pipeline on each shank signal (`hitlo.detection`)
 3. Interleaves left/right heel strikes → step times → symmetry index (`hitlo.symmetry`)
-4. Adds a spring-shape penalty (prefers dorsiflexion-assist spring profiles) THESE VALUES ARE SET TO ZERO FOR ME!
+4. Adds a spring-shape penalty (prefers dorsiflexion-assist spring profiles) — *currently set to zero in this repo*
 5. Returns the total cost
 
 The GP-based BO picks the next suggestion to minimize this cost.
@@ -117,15 +119,21 @@ The GP-based BO picks the next suggestion to minimize this cost.
 
 ## Detection pipeline (one-paragraph summary)
 
-Raw tri-axial acceleration → magnitude `|a|` → jerk `|d|a|/dt|` → 15 Hz
-lowpass Butterworth → z-scored. Candidate peaks detected with a strict
-threshold (0.7 SD) and a gap-fill recovery pass (1.8 SD in anomalously long
-gaps). Candidates grouped into gait-cycle clusters (peaks within 0.65 s).
-Within each cluster, scan from the last peak backwards; pick the first one
-that is (a) above gravity baseline (not a free-fall trough) AND (b) followed
-by a stance region (flat signal near baseline). That's the heel strike. Each
-cluster emits exactly one heel strike (or zero if nothing qualifies). Edge
-singletons dropped; trial ends trimmed 3 seconds each way.
+Raw tri-axial acceleration → magnitude `|a| = sqrt(x² + y² + z²)` → 50 Hz
+lowpass Butterworth (filtfilt, zero phase delay) → differentiate → z-score.
+The 50 Hz cutoff sits well above the heel-strike impact band (5–30 Hz), so
+the lowpass acts as light noise cleanup rather than reshaping the impact.
+Candidate peaks detected on jerk z-score with a strict threshold (0.7 SD) and
+a gap-fill recovery pass (1.8 SD in anomalously long gaps). Candidates
+grouped into gait-cycle clusters (peaks within 0.5 s). Within each cluster,
+scan from the last peak backwards; pick the first one that is (a) above
+gravity baseline (not a free-fall trough) AND (b) followed by a stance region
+(flat signal near baseline). That's the heel strike. Each cluster emits
+exactly one heel strike (or zero if nothing qualifies). Edge singletons
+dropped; trial ends trimmed 3 seconds each way.
+
+Symmetry index follows the standard form `SI = 2 × (R - L) / (R + L) × 100%`
+where `R, L` are mean step times.
 
 Full methodology, physiologic justification, and literature references in
 [docs/detection_pipeline.md](docs/detection_pipeline.md).
@@ -139,8 +147,11 @@ walkthrough of what to change.
 
 ## Versioning
 
-- **v2.0.0** (current, this repo) — refactored into library structure; detection
-  logic consolidated into `hitlo.detection` as single source of truth
+- **v2.1.0** (current) — switched to filter-then-diff at 50 Hz cutoff
+  (textbook ordering, empirically validated); tightened cluster-gap to 0.5 s
+  to prevent merging consecutive heel strikes at higher cadences
+- **v2.0.0** — refactored into library structure; detection logic consolidated
+  into `hitlo.detection` as single source of truth
 - **v1.8.0** — flat-file layout; cluster-keep-last added to `symmetry_cost.py`
 - **v1.7.2** — LSL timestamp fix (two-sensor drift)
 - **v1.6.0** — jerk-based detection replaces magnitude-peak detection
@@ -153,7 +164,7 @@ walkthrough of what to change.
 - 2× Polar H10 chest straps → worn on shanks with Coban wrap
 - Mac laptop with LabRecorder, LSL, Python 3.9+
 
-Sensor IDs (THESE WILL CHANGE DEPEDNING ON SENSOR USED:
+Sensor IDs (these will change depending on the sensors used):
 - Left shank: `7F302C25`
 - Right shank: `80AE3629`
 
@@ -170,13 +181,14 @@ Sensor IDs (THESE WILL CHANGE DEPEDNING ON SENSOR USED:
 
 ## Citation
 
-If you use this code, please cite both the HITLO_Symmetry method paper (in prep)
-and the underlying HIL_toolkit
+If you use this code, please cite both the HITLO_Symmetry method paper
+(in prep) and the underlying HIL_toolkit.
+
 ---
 
 ## License
 
-MIT (see [LICENSE](LICENSE))
+MIT (see [LICENSE](LICENSE)).
 
 HIL_toolkit is separately licensed; see its
 [repository](https://github.com/UICRRL/HIL_toolkit) for details.
