@@ -8,8 +8,9 @@ tool (apps/diagnose_trial.py) use these functions so they stay in sync.
 PIPELINE
 --------
 1. compute_magnitude()       : raw |a| = sqrt(x² + y² + z²), orientation invariant
-2. compute_jerk_z()          : lowpass-filter d|a|/dt and z-score; heel strikes
-                               show up as big positive jerk spikes
+2. compute_jerk_z()          : lowpass-filter |a|, differentiate, then z-score
+                               the result; heel strikes show up as big positive
+                               jerk spikes
 3. detect_peak_candidates()  : strict threshold + gap-fill recovery on jerk z
 4. cluster_keep_last()       : group candidates into gait-cycle clusters; pick
                                the LAST peak per cluster that is (a) above the
@@ -26,6 +27,27 @@ quasi-stationary, so the accelerometer reads essentially gravity alone —
 the signal flattens near 1g. Our detector identifies heel strike as the
 peak in each cluster that (a) is a genuine impact (above baseline) and
 (b) is followed by this stance signature.
+
+NOTE ON FILTER ORDERING
+-----------------------
+We filter |a| BEFORE differentiating (textbook ordering). Differentiation
+amplifies high-frequency noise, so removing the noise first yields a
+cleaner derivative.
+
+The cutoff (45 Hz) sits well above the spectral content of heel-strike
+impacts (~5–30 Hz), so the lowpass acts as light noise cleanup rather
+than active signal shaping. At cutoffs near the impact band (e.g. 15 Hz),
+filtering distorts the impact peak and degrades detection — empirically
+validated on P048 run-007: 15 Hz filter-then-diff dropped real heel
+strikes and doubled per-stride SI variance, while 45 Hz preserves impact
+fidelity (raw |a| and filtered |a| overlap through the impact peak).
+
+NOTE ON CAUSALITY
+-----------------
+filtfilt runs the filter forward + backward → zero phase delay (no time
+shift on detected peaks). This pipeline is OFFLINE — filtfilt uses future
+samples and cannot run in real time. For a real-time deployment, substitute
+a causal FIR with documented group delay.
 
 References
 ----------
@@ -56,8 +78,9 @@ class DetectionConfig:
     # Sample rate (Polar H10)
     fs: int = 200
 
-    # Jerk signal preparation
-    smooth_cutoff_hz: float = 15.0
+    # Jerk signal preparation — 45 Hz keeps the impact band (5–30 Hz) intact
+    # while removing high-frequency sensor noise.
+    smooth_cutoff_hz: float = 45.0
 
     # Peak detection thresholds (in units of jerk z-score standard deviations)
     strict_thresh: float = 0.7      # primary pass: catches most events
@@ -111,12 +134,26 @@ def compute_jerk_z(accel_data: np.ndarray,
                    ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute smoothed, z-scored jerk signal.
 
-    Jerk = |d(magnitude)/dt|. This emphasizes sudden transitions (heel strike,
-    toe-off) while suppressing slow changes (gravity reorientation during swing).
+    Pipeline order (filter-first, textbook):
+        |a| → lowpass-filter → differentiate → z-score
 
-    The signal is lowpass-filtered (Butterworth, order 4, default 15 Hz cutoff)
-    to remove high-frequency sensor noise, then z-scored so thresholds can be
-    expressed in units of standard deviations above the noise floor.
+    Differentiation amplifies high-frequency noise, so removing the noise
+    BEFORE differentiation gives a cleaner derivative. Heel strikes turn
+    into large positive spikes in the jerk signal because the shank
+    decelerates abruptly at impact; toe-off and slow gravity-reorientation
+    produce smaller jerk responses.
+
+    The lowpass is a 4th-order Butterworth at 45 Hz (default), applied with
+    filtfilt → zero phase delay so detected peaks aren't time-shifted. The
+    cutoff sits well above heel-strike impact content (5–30 Hz), so the
+    filter does light noise cleanup rather than reshaping the impact.
+
+    The result is z-scored so thresholds can be expressed in units of
+    standard deviations above the noise floor (subject-independent).
+
+    NOTE: filtfilt is non-causal (uses future samples). This pipeline is
+    offline; real-time deployment would require swapping in a causal FIR
+    with documented group delay.
 
     Parameters
     ----------
@@ -125,18 +162,20 @@ def compute_jerk_z(accel_data: np.ndarray,
 
     Returns
     -------
-    jerk_z    : ndarray, shape (N,)     z-scored, smoothed jerk
-    magnitude : ndarray, shape (N,)     raw |a|, returned for downstream use
-                                        (cluster-keep-last needs it)
+    jerk_z    : ndarray, shape (N,)     z-scored jerk
+    magnitude : ndarray, shape (N,)     RAW |a|, returned for downstream use
+                                        (cluster-keep-last needs the unfiltered
+                                        magnitude for baseline + stance check)
     """
     magnitude = compute_magnitude(accel_data)
 
-    jerk = np.abs(np.diff(magnitude) * cfg.fs)
-    jerk = np.concatenate([[0.0], jerk])  # prepend zero to preserve length
-
-    # Butterworth lowpass via filtfilt = zero phase delay (no time shift)
+    # Filter |a| FIRST, then differentiate.
+    # Butterworth lowpass via filtfilt → zero phase delay (no time shift).
     b, a = butter(4, cfg.smooth_cutoff_hz / (0.5 * cfg.fs), btype='low')
-    jerk_sm = filtfilt(b, a, jerk)
+    magnitude_sm = filtfilt(b, a, magnitude)
+
+    jerk_sm = np.abs(np.diff(magnitude_sm) * cfg.fs)
+    jerk_sm = np.concatenate([[0.0], jerk_sm])  # prepend zero to preserve length
 
     std = float(np.std(jerk_sm))
     if std < 1e-6:
