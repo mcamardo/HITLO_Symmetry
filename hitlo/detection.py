@@ -83,7 +83,7 @@ class DetectionConfig:
     smooth_cutoff_hz: float = 50.0
 
     # Peak detection thresholds (in units of jerk z-score standard deviations)
-    strict_thresh: float = 0.7      # primary pass: catches most events
+    strict_thresh: float = 1.3     # primary pass: catches most events
     recovery_thresh: float = 1.8    # fallback pass: fills anomalous gaps
     gap_multiplier: float = 1.7     # a gap > this × median is "anomalously long"
     min_peak_dist_s: float = 0.10   # minimum separation between candidate peaks
