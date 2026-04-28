@@ -77,8 +77,6 @@ HITLO_Symmetry/
 ├── apps/                          # user-facing tools
 │   ├── run_experiment.py          # Streamlit UI for live BO trials
 │   ├── diagnose_trial.py          # standalone trial QC plotter
-│   ├── compare_filter_order.py    # filter-ordering validation diagnostic
-│   ├── explainer.py               # 7-panel pipeline-explainer figure
 │   ├── gp_viewer.py               # interactive GP surface viewer (post-hoc)
 │   └── collect_sensors.py         # BLE sensor startup script
 │
