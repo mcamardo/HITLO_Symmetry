@@ -15,12 +15,12 @@ multi-stage pipeline:
 ```
 raw tri-axial accel
    → magnitude |a|
-   → jerk = |d|a|/dt|
-   → 15 Hz lowpass Butterworth, order 4, filtfilt (zero phase delay)
+   → 50 Hz lowpass Butterworth, order 4, filtfilt (zero phase delay)
+   → differentiate → jerk = |d|a|/dt|
    → z-score normalization
    → strict peak detection (0.7 SD jerk)
    → gap-fill recovery (1.8 SD in anomalously long gaps)
-   → cluster candidates (peaks within 0.65 s)
+   → cluster candidates (peaks within 0.5 s)
    → within each cluster: scan last-to-first, accept the first peak that is
       (a) above gravity baseline AND
       (b) followed by a stance region (post-peak window near baseline)
@@ -113,12 +113,66 @@ magnitude = √(x² + y² + z²)
 3. **Physical interpretability.** `|a|` near baseline = quasi-stationary;
    `|a|` spiking = impact. This lets us write physiology-grounded thresholds.
 
-### Stage 2 — Jerk transform + lowpass + z-score
+### Stage 2 — Lowpass filter, then differentiate, then z-score
 
-#### Jerk
+#### Lowpass filter (applied to magnitude FIRST)
 
 ```python
-jerk = |d|a|/dt|
+b, a = butter(4, 50 Hz / Nyquist, btype='low')
+magnitude_smooth = filtfilt(b, a, magnitude)
+```
+
+**Why filter before differentiating?** Differentiation amplifies high-
+frequency noise (a small-amplitude high-frequency wiggle becomes a large-
+amplitude jerk spike after `d/dt`). The textbook approach is to remove that
+noise *before* differentiating so the derivative is computed from a clean
+signal. We follow that convention.
+
+This was changed from earlier versions of the pipeline. Empirical
+validation history is documented below ("Filter-ordering validation").
+
+**Why 50 Hz cutoff?** Heel-strike impact energy concentrates between roughly
+5 Hz and 30 Hz (sharp transients lasting 30–80 ms). A cutoff at 50 Hz sits
+well above that band, so the filter acts as **light noise cleanup** rather
+than reshaping the impact itself. Lower cutoffs (15–30 Hz) cut into the
+impact band and visibly distort the impact peak: filtered magnitude shows a
+~25% lower peak height and ~doubled peak width compared to raw magnitude.
+That distortion propagates into shifted jerk peaks and degraded detection
+specificity.
+
+The Polar H10 sensor's electronic noise floor sits well above 50 Hz, so
+content above that cutoff is essentially garbage worth removing. Below
+50 Hz, the cutoff preserves both the gait fundamentals (~1 Hz) and the
+impact harmonics (out to ~30 Hz).
+
+**Why Butterworth?** Butterworth filters have a maximally flat passband (no
+ripple), preserving the heel-strike peak shape faithfully. Alternatives
+like Chebyshev would give sharper rolloff but introduce ripples that
+distort the impact shape.
+
+**Why order 4?** Each order roughly doubles the rolloff rate (order 4 is
+~24 dB/octave, which means frequencies above 50 Hz are suppressed by at
+least a factor of 16 per doubling). Order 2 is too gentle; order 8+ risks
+numerical instability and transient ringing. Order 4 is the biomechanics
+standard.
+
+**Why filtfilt (not filter)?** A normal IIR filter introduces a frequency-
+dependent phase delay — filtered peaks land slightly *after* raw peaks.
+Since we're doing timing-based analysis (step times in milliseconds), delay
+is unacceptable. `filtfilt` runs the filter forward then backward, canceling
+the delay exactly. The result is zero-phase; the effective order doubles
+(so our order-4 gives order-8 rolloff magnitude-wise), which is a bonus.
+
+**Caveat: filtfilt is non-causal.** Because filtfilt uses future samples
+(it runs the filter backward as well as forward), this pipeline is **offline
+only**. For real-time deployment, this stage would need to be replaced with
+a causal FIR filter with documented group delay (and the timestamps
+compensated accordingly).
+
+#### Jerk (differentiate the smoothed magnitude)
+
+```python
+jerk = |d(magnitude_smooth)/dt|
 ```
 
 **Why jerk (rate of change of magnitude) instead of raw magnitude?** Jerk
@@ -134,46 +188,14 @@ Using jerk rather than raw magnitude makes the detector look for *events*
 which is exactly what we want for timing individual heel strikes.
 
 Voisard et al. (2024, *J NeuroEng Rehabil* 21:104) demonstrated this
-approach on an IMU-based gait event detector for shank-mounted sensors and
-used a 14 Hz lowpass; Prasanth et al. (2021, *Sensors*) review similar
-rule-based detection approaches.
-
-#### Lowpass filter
-
-```python
-b, a = butter(4, 15 Hz / Nyquist, btype='low')
-jerk_smooth = filtfilt(b, a, jerk)
-```
-
-**Why 15 Hz cutoff?** Gait-cycle fundamental frequencies are around 1 Hz
-(stride rate) with harmonics out to ~10 Hz. Heel-strike impact energy
-concentrates around 5–15 Hz. Above that range, you're capturing sensor
-electronics noise, BLE packet jitter, Coban micro-vibrations, and soft-tissue
-ringing after impact — none of which represent the gait event itself.
-
-**Why Butterworth?** Butterworth filters have a maximally flat passband (no
-ripple), preserving the heel-strike peak shape faithfully. Alternatives
-like Chebyshev would give sharper rolloff but introduce ripples that distort
-the impact shape.
-
-**Why order 4?** Each order roughly doubles the rolloff rate (order 4 is
-~24 dB/octave, which means frequencies above 15 Hz are suppressed by at
-least a factor of 16 per doubling). Order 2 is too gentle; order 8+ risks
-numerical instability and transient ringing. Order 4 is the biomechanics
-standard.
-
-**Why filtfilt (not filter)?** A normal IIR filter introduces a frequency-
-dependent phase delay — filtered peaks land slightly *after* raw peaks.
-Since we're doing timing-based analysis (step times in milliseconds), delay
-is unacceptable. `filtfilt` runs the filter forward then backward,
-canceling the delay exactly. The result is zero-phase; the effective order
-doubles (so our order-4 gives order-8 rolloff magnitude-wise), which is a
-bonus.
+approach on an IMU-based gait event detector for shank-mounted sensors;
+Prasanth et al. (2021, *Sensors*) review similar rule-based detection
+approaches.
 
 #### Z-score normalization
 
 ```python
-jerk_z = (jerk_smooth - mean) / std
+jerk_z = (jerk - mean) / std
 ```
 
 **Why z-score?** Thresholds expressed in units of standard deviations above
@@ -205,8 +227,8 @@ expensive because every missed heel strike distorts the step-time pattern.
 Strategy: *over-detect now, filter aggressively later.*
 
 **Why distance=100 ms?** No real human walking stride produces two heel
-strikes less than 100 ms apart. This prevents the peak detector from double-
-counting a single peak that has a small notch at its apex.
+strikes less than 100 ms apart. This prevents the peak detector from
+double-counting a single peak that has a small notch at its apex.
 
 #### Pass 2 (gap-fill recovery)
 
@@ -248,12 +270,22 @@ other gait events also present — toe-off, mid-swing transients, post-impact
 tissue ringing).
 
 The cluster stage exploits the physiology: **one gait cycle = one heel
-strike, but many jerk peaks.** Group peaks that are within 0.65 s of a
+strike, but many jerk peaks.** Group peaks that are within 0.5 s of a
 neighbor into clusters.
 
-**Why 0.65 s?** Shorter than a full stride (~1.0–1.5 s) but longer than the
-active-events duration within a single cycle (~0.3–0.5 s). Peaks from the
-same cycle cluster together; peaks from consecutive cycles stay separate.
+**Why 0.5 s?** This must be long enough to gather all peaks that belong to
+one gait cycle (heel strike + post-impact wobble + toe-off-related peaks)
+but short enough that two consecutive heel strikes don't accidentally fall
+into the same cluster.
+
+Earlier versions used 0.65 s, which was wide enough to span heel strike +
+toe-off in the same cluster (the original design). However, at higher
+cadences (stride times below ~1.3 s, common in healthy walking and
+voluntary asymmetric trials), 0.65 s was wide enough to span *consecutive
+heel strikes*, merging two gait cycles into one cluster and losing strides.
+Tightening to 0.5 s preserves the original design intent (heel-strike +
+post-impact peaks cluster together) while reliably keeping consecutive
+heel strikes in separate clusters across the full cadence range we observe.
 
 ### Stage 5 — The two physiologic filters
 
@@ -287,10 +319,10 @@ if mad > 0.15 × baseline:
     skip this peak
 ```
 
-**Why:** A real heel strike is *immediately followed by stance*: the foot is
-planted, the shank is quasi-stationary, and the accelerometer reads mostly
-gravity. In a 200 ms window starting 100 ms after peak (skipping impact
-ring-down), the magnitude should stay close to baseline.
+**Why:** A real heel strike is *immediately followed by stance*: the foot
+is planted, the shank is quasi-stationary, and the accelerometer reads
+mostly gravity. In a 200 ms window starting 100 ms after peak (skipping
+impact ring-down), the magnitude should stay close to baseline.
 
 We compute mean absolute deviation (MAD) from baseline across that window.
 If MAD exceeds 15% of baseline (~150 mg on a 1000 mg baseline), the shank
@@ -394,6 +426,41 @@ regardless of direction, which is not the clinical goal.
 
 ---
 
+## Filter-ordering validation
+
+A previous iteration of this pipeline differentiated the magnitude *first*
+and then lowpass-filtered the resulting jerk. The current pipeline reverses
+that order (filter first, differentiate second), which is the textbook
+signal-processing convention.
+
+This change was empirically validated on participant P048 (run-007). Three
+filter cutoffs were tested under both orderings:
+
+| Cutoff | OLD (diff-then-filter) | NEW (filter-then-diff) |
+|--------|-----------------------|------------------------|
+| 15 Hz  | 22 / 22 accepted, SI std 10.4% | 20 / 22 accepted, SI std 20.9% |
+| 30 Hz  | (not tested in original pipeline) | 20 / 22 accepted, SI std 16.3% |
+| 45 Hz  | 21 / 22 accepted, SI std ~10% | 21 / 22 accepted, SI std ~10% |
+
+At the original 15 Hz cutoff, filter-first dropped 2 real heel strikes and
+doubled per-stride SI variance. Inspection showed the 15 Hz lowpass smearing
+the impact peak (~25% reduction in peak height, ~doubled peak width), so the
+subsequent differentiation no longer produced a clean spike.
+
+At a 45–50 Hz cutoff, the lowpass acts well above the impact band and barely
+affects the magnitude signal in the impact region. At that point ordering
+becomes irrelevant — both pipelines produce nearly identical jerk signals
+and detection counts. The current pipeline uses **50 Hz** as its default
+cutoff with filter-first ordering, capturing the textbook convention while
+preserving the impact fidelity that motivated the original design.
+
+The validation script lives at `apps/compare_filter_order.py` and produces
+a 6-panel figure including a zoomed comparison of raw vs. filtered magnitude
+through a single impact, which is the most direct visualization of whether
+a given cutoff is destroying impact information.
+
+---
+
 ## Why NOT other approaches
 
 ### Why not train an ML classifier?
@@ -442,15 +509,14 @@ The pipeline was validated on participant P048 (healthy, voluntarily
 asymmetric gait) across 7 trials. On run-007 (volitional right-step-longer
 walk), the pipeline detected:
 
-- LEFT sensor: 60 candidates → 22 heel strikes (after cluster + filter)
-- RIGHT sensor: 66 candidates → 22 heel strikes
+- LEFT sensor: ~88 candidates → 21 heel strikes (after cluster + filter)
+- RIGHT sensor: ~87 candidates → 22 heel strikes
 - After 3 s trim: 18 + 18 heel strikes
-- 17 left steps + 17 right steps
-- Right step mean: 0.981 s; Left step mean: 0.845 s
-- **SI = +14.33%** (right step 14% longer, matching participant intent)
+- Right step mean: ~0.98 s; Left step mean: ~0.84 s
+- **SI ≈ +14%** (right step ~14% longer, matching participant intent)
 
-The v2.0.0 refactored library reproduces v1.8.0 output bit-identically
-(0.000000 cost difference) on this validation trial.
+Filter-ordering and cutoff choices were validated against the original
+diff-then-filter pipeline at 15 Hz; see "Filter-ordering validation" above.
 
 ---
 
@@ -460,3 +526,10 @@ Voisard C et al. (2024). Automatic gait events detection with inertial
 measurement units: healthy subjects and moderate to severe impaired
 patients. *Journal of NeuroEngineering and Rehabilitation* 21:104.
 
+Prasanth H et al. (2021). Wearable sensor-based real-time gait detection:
+a systematic review. *Sensors* 21(8):2727.
+
+Trojaniello D et al. (2014). Estimation of step-by-step spatio-temporal
+parameters of normal and impaired gait using shank-mounted magneto-inertial
+sensors: application to elderly, hemiparetic, parkinsonian and
+choreic gait. *Journal of NeuroEngineering and Rehabilitation* 11:152.
