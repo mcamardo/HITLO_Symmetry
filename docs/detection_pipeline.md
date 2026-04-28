@@ -140,6 +140,16 @@ impact band and visibly distort the impact peak: filtered magnitude shows a
 That distortion propagates into shifted jerk peaks and degraded detection
 specificity.
 
+Sheerin et al. (2019, *Gait & Posture* 67:12-24) reviewed filter conventions
+in tibial-impact IMU literature and reported that lowpass cutoffs
+"between 40 Hz and 100 Hz" are typical, with empirical analyses indicating
+that 99% of tibial acceleration spectral power during running falls below
+60 Hz. The 50 Hz cutoff used here sits at the lower end of this range.
+Note that Sheerin's review concerns peak-amplitude measurement on raw
+acceleration; our pipeline differentiates the magnitude signal afterward,
+so the appropriateness of the cutoff for our specific use case was
+validated empirically (see "Filter-ordering validation" below).
+
 The Polar H10 sensor's electronic noise floor sits well above 50 Hz, so
 content above that cutoff is essentially garbage worth removing. Below
 50 Hz, the cutoff preserves both the gait fundamentals (~1 Hz) and the
@@ -187,10 +197,14 @@ Using jerk rather than raw magnitude makes the detector look for *events*
 (brief, localized changes) rather than *levels* (absolute amplitudes),
 which is exactly what we want for timing individual heel strikes.
 
-Voisard et al. (2024, *J NeuroEng Rehabil* 21:104) demonstrated this
-approach on an IMU-based gait event detector for shank-mounted sensors;
-Prasanth et al. (2021, *Sensors*) review similar rule-based detection
-approaches.
+Zhou et al. (2016, *Sensors* 16(10):1634) demonstrated this approach
+on a shank-mounted IMU, computing jerk as the magnitude of the
+acceleration derivative and applying peak heuristics to detect heel
+strikes and toe-offs across level-ground, ascending-stair, and
+descending-stair walking with F1 scores >0.98 in healthy subjects.
+Our pipeline follows this fundamental approach with several extensions
+described below (z-score normalization, two-pass detection, cluster
+keep-last, and stance verification).
 
 #### Z-score normalization
 
@@ -454,8 +468,9 @@ and detection counts. The current pipeline uses **50 Hz** as its default
 cutoff with filter-first ordering, capturing the textbook convention while
 preserving the impact fidelity that motivated the original design.
 
-The validation script lives at `apps/compare_filter_order.py` and produces
-a 6-panel figure including a zoomed comparison of raw vs. filtered magnitude
+The validation script (`compare_filter_order.py`) lives outside the main
+repository in the author's local-tools directory; it produces a 6-panel
+figure including a zoomed comparison of raw vs. filtered magnitude
 through a single impact, which is the most direct visualization of whether
 a given cutoff is destroying impact information.
 
@@ -478,10 +493,18 @@ and future students can understand and tune it without ML background.
 
 ### Why not template matching / DTW?
 
-Template methods (e.g. Trojaniello et al. 2014) work well on rhythmic
-healthy gait but degrade with the high stride-to-stride variability of
-stroke gait. Rule-based detection with physiologic filters handles
-irregular gait more gracefully.
+Template-matching approaches (e.g. Voisard et al. 2024, which uses
+autocorrelation to identify a reference stride pattern and then
+multiparametric Dynamic Time Warping to annotate gait events) are
+filter-tolerant by design and achieve excellent accuracy on healthy
+subjects (F1 = 100%, median timing error 8 ms in their data). However,
+they require a coherent stride pattern to bootstrap the template. Stride-
+to-stride variability in stroke gait can degrade the autocorrelation
+peak, and template matching adds a tunable component (the template
+itself) that must be characterized. For a real-time BO loop where each
+60-second trial must be processed independently and reproducibly,
+threshold-based detection on jerk peaks is simpler to inspect and
+debug, even at some accuracy cost.
 
 ### Why not raw accelerometer peak detection (like the old sternum pipeline)?
 
@@ -522,14 +545,49 @@ diff-then-filter pipeline at 15 Hz; see "Filter-ordering validation" above.
 
 ## References
 
-Voisard C et al. (2024). Automatic gait events detection with inertial
-measurement units: healthy subjects and moderate to severe impaired
-patients. *Journal of NeuroEngineering and Rehabilitation* 21:104.
+**Primary methodological precedents:**
 
-Prasanth H et al. (2021). Wearable sensor-based real-time gait detection:
-a systematic review. *Sensors* 21(8):2727.
+Zhou H, Ji N, Samuel OW, Cao Y, Zhao Z, Chen S, Li G (2016).
+Towards Real-Time Detection of Gait Events on Different Terrains
+Using Time-Frequency Analysis and Peak Heuristics Algorithm.
+*Sensors* 16(10):1634. doi:10.3390/s16101634. PMID: 27706086.
+**Cited for:** Jerk-based heel-strike and toe-off detection from
+shank-mounted accelerometer signals; peak heuristics with
+adaptive thresholds and refractory windows. F1 > 0.98 for
+heel-strike detection on level ground, ascending stairs, and
+descending stairs in healthy subjects.
 
-Trojaniello D et al. (2014). Estimation of step-by-step spatio-temporal
-parameters of normal and impaired gait using shank-mounted magneto-inertial
-sensors: application to elderly, hemiparetic, parkinsonian and
-choreic gait. *Journal of NeuroEngineering and Rehabilitation* 11:152.
+Sheerin KR, Reid D, Besier TF (2019). The measurement of tibial
+acceleration in runners — a review of the factors that can affect
+tibial acceleration during running and evidence-based guidelines
+for its use. *Gait & Posture* 67:12-24.
+doi:10.1016/j.gaitpost.2018.09.017. PMID: 30248663.
+**Cited for:** Conventional lowpass filter cutoff range
+(40-100 Hz, modal value 60 Hz) for tibial-impact IMU signal
+preprocessing. Empirical observation that 99% of tibial
+acceleration spectral power during locomotion falls below 60 Hz.
+
+**Comparative methods (alternative approaches we considered but did not adopt):**
+
+Voisard C, de l'Escalopier N, Ricard D, Oudre L (2024). Automatic
+gait events detection with inertial measurement units: healthy
+subjects and moderate to severe impaired patients.
+*J NeuroEng Rehabil* 21:104. doi:10.1186/s12984-024-01405-x.
+PMID: 38890696.
+**Cited for:** Template-based gait event detection using
+autocorrelation and multiparametric Dynamic Time Warping on
+filtered acceleration signals. Excellent accuracy (F1=100%
+healthy, median 8 ms timing error) but requires bootstrapping a
+stride template from coherent input data. Different methodology
+from our threshold-based approach.
+
+Trojaniello D, Cereatti A, Pelosin E, Avanzino L, Mirelman A,
+Hausdorff JM, Della Croce U (2014). Estimation of step-by-step
+spatio-temporal parameters of normal and impaired gait using
+shank-mounted magneto-inertial sensors: application to elderly,
+hemiparetic, parkinsonian and choreic gait. *J NeuroEng Rehabil*
+11:152. doi:10.1186/1743-0003-11-152. PMID: 25388296.
+**Cited for:** Shank-mounted IMU gait event detection in
+pathological gait via medial-lateral angular velocity features
+(an alternative kinematic detection approach to our impact-based
+approach).
