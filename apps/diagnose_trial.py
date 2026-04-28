@@ -12,7 +12,7 @@ Also prints a summary report with symmetry index, sample-rate drift, warnings.
 Usage
 -----
     # Default (edit XDF_FILE below)
-    python apps/diagnose_trial.py
+    python3 apps/diagnose_trial.py
 
     # Specify a file
     python apps/diagnose_trial.py /path/to/trial.xdf

@@ -1,13 +1,13 @@
 # ============================================================
 # CHANGE THESE TWO VALUES BETWEEN PARTICIPANTS/SESSIONS
 # ============================================================
-participant: &pid     "P048"
+participant: &pid     "P001"
 session:     &ses     "S001"
 
 Subject:
   id:       *pid
   session:  *ses
-  base_dir: "/Users/maccamardo/HITLO"
+  base_dir: "/Users/maccamardo/HITLO_Data"
 
 Cost:
   sample_rate: 200
