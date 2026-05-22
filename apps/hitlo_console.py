@@ -1,5 +1,5 @@
 """
-apps/run_experiment.py — Streamlit UI for HITLO_Symmetry live BO trials.
+apps/hitlo_console.py — HITLO_Symmetry multi-page console.
 
 This is the clinician-facing tool. It:
   - Shows live Polar H10 streams so you can confirm sensors before each trial
@@ -122,11 +122,7 @@ def _distance_from_target(cost_value: float, config: dict) -> float:
 # Streamlit setup + session state
 # ===========================================================================
 
-st.set_page_config(
-    page_title="HITLO_Symmetry Experiment",
-    page_icon="🦾",
-    layout="wide",
-)
+# (page config set by navigation entry point below)
 
 if 'initialized' not in st.session_state:
     st.session_state.initialized = False
@@ -639,17 +635,19 @@ def plot_gp_surface():
     y_obs = hil.y_opt
     best_idx = _best_idx(y_obs, config)
 
-    fig = go.Figure()
+    from plotly.subplots import make_subplots as _msp
+    fig = _msp(
+        rows=1, cols=2,
+        subplot_titles=("GP Mean — Predicted Cost", "GP Uncertainty (±1σ)"),
+        specs=[[{'type': 'surface'}, {'type': 'surface'}]],
+        horizontal_spacing=0.04)
+
+    # --- Panel 1: mean surface ---
     fig.add_trace(go.Surface(
         x=R_grid, y=L0_grid, z=mean_display,
-        colorscale='RdYlGn_r', opacity=0.85, name='GP Mean',
-        colorbar=dict(title='Predicted Cost', x=1.02), showscale=True))
-    fig.add_trace(go.Surface(
-        x=R_grid, y=L0_grid, z=mean_display + std_display,
-        colorscale='Blues', opacity=0.18, showscale=False, name='+1 Std'))
-    fig.add_trace(go.Surface(
-        x=R_grid, y=L0_grid, z=mean_display - std_display,
-        colorscale='Blues', opacity=0.18, showscale=False, name='-1 Std'))
+        colorscale='RdYlGn_r', opacity=0.92,
+        colorbar=dict(title='Pred. Cost', x=0.44, len=0.8, thickness=12),
+        showscale=True), row=1, col=1)
 
     if len(x_obs) > 0:
         mask = np.ones(len(x_obs), dtype=bool)
@@ -657,32 +655,49 @@ def plot_gp_surface():
         if mask.any():
             fig.add_trace(go.Scatter3d(
                 x=x_obs[mask, 0], y=x_obs[mask, 1], z=y_obs[mask],
-                mode='markers', name='Observed Trials',
-                marker=dict(size=6, color='royalblue',
-                            line=dict(color='white', width=1))))
+                mode='markers', name='Trials',
+                marker=dict(size=6, color='#3A2415',
+                            line=dict(color='white', width=1))),
+                row=1, col=1)
         if _signed_mode(config):
-            best_label = (f"Best (SI={y_obs[best_idx]:+.3f}, "
-                          f"|Δ|={abs(y_obs[best_idx] - _si_target(config)):.3f})")
+            best_label = (f"Best (SI={y_obs[best_idx]:+.2f}, "
+                          f"|Δ|={abs(y_obs[best_idx] - _si_target(config)):.2f})")
         else:
-            best_label = f"Best (Cost={y_obs[best_idx]:.3f})"
+            best_label = f"Best ({y_obs[best_idx]:.2f})"
         fig.add_trace(go.Scatter3d(
             x=[x_obs[best_idx, 0]], y=[x_obs[best_idx, 1]],
-            z=[y_obs[best_idx]], mode='markers',
-            name=best_label,
-            marker=dict(size=12, color='gold', symbol='diamond',
-                        line=dict(color='darkorange', width=2))))
+            z=[y_obs[best_idx]], mode='markers', name=best_label,
+            marker=dict(size=12, color='#E8772E', symbol='diamond',
+                        line=dict(color='#7A3A0A', width=2))),
+            row=1, col=1)
+
+    # --- Panel 2: uncertainty surface ---
+    fig.add_trace(go.Surface(
+        x=R_grid, y=L0_grid, z=std_display,
+        colorscale='Oranges',
+        colorbar=dict(title='σ', x=1.0, len=0.8, thickness=12),
+        showscale=True), row=1, col=2)
+    if len(x_obs) > 0:
+        fig.add_trace(go.Scatter3d(
+            x=x_obs[:, 0], y=x_obs[:, 1], z=np.zeros(len(x_obs)),
+            mode='markers', showlegend=False,
+            marker=dict(size=5, color='#3A2415', opacity=0.7)),
+            row=1, col=2)
 
     if _signed_mode(config):
         para_str = f"target SI = {_si_target(config):+.1f}%"
     else:
         para_str = "minimize |cost|"
+    cam = dict(eye=dict(x=1.5, y=-1.5, z=1.2))
     fig.update_layout(
-        title=(f'GP Cost Surface  |  R [{R_min}–{R_max}]  L₀ [{L0_min}–{L0_max}]  '
-               f'|  {para_str}'),
+        title=(f'GP Cost Surface  |  R [{R_min}–{R_max}]  '
+               f'L₀ [{L0_min}–{L0_max}]  |  {para_str}'),
+        height=620, margin=dict(l=0, r=0, t=70, b=0), showlegend=True,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.05),
         scene=dict(xaxis_title='R (m)', yaxis_title='L₀ (m)',
-                   zaxis_title='Predicted Cost',
-                   camera=dict(eye=dict(x=1.5, y=-1.5, z=1.2))),
-        height=650, margin=dict(l=0, r=0, t=60, b=0), showlegend=True,
+                   zaxis_title='Pred. Cost', camera=cam),
+        scene2=dict(xaxis_title='R (m)', yaxis_title='L₀ (m)',
+                    zaxis_title='σ', camera=cam),
     )
     return fig
 
@@ -997,731 +1012,957 @@ def plot_live_sensor(store, name: str, sample_rate: int):
 
 
 # ===========================================================================
-# MAIN UI
+# ===========================================================================
+# ===========================================================================
+#  MULTI-PAGE CONSOLE  —  styling, header, navigation, and page functions
+# ===========================================================================
 # ===========================================================================
 
-st.title("🦾 HITLO_Symmetry — Exoskeleton Optimization")
-st.markdown("---")
+import glob
+
+ACCENT = "#E8772E"      # primary orange — matches prelim
+ACCENT_DK = "#B5560F"   # deep burnt orange — high-emphasis
+ACCENT_DEEP = "#7A3A0A" # darkest orange-brown — header/chips
+ACCENT_LT = "#FCA86A"   # light orange — soft fills, hovers
+BG = "#FDF4EC"          # light peach-cream background
+PANEL = "#FFFFFF"       # white card surface (clean contrast vs bg)
+PANEL_2 = "#FBE6D4"     # secondary peach surface
+BORDER = "#EFCBA8"      # warm orange-tinted border
+TEXT = "#2E1B0E"        # near-black warm brown text
+MUTED = "#9B7B63"       # warm muted brown
+
+
+def inject_theme():
+    """Global CSS — refined 'clinical instrument' aesthetic."""
+    st.markdown(f"""
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+      html, body, [class*="css"] {{
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-weight: 500;
+      }}
+      h1, h2, h3, h4 {{
+          font-family: 'Space Grotesk', sans-serif;
+          letter-spacing: -0.02em;
+          font-weight: 700 !important;
+          color: {TEXT};
+      }}
+      /* heavier body labels */
+      label, .stMarkdown p, p {{ font-weight: 500; }}
+      label p {{ font-weight: 600 !important; }}
+      .block-container {{
+          padding-top: 4rem; padding-bottom: 3rem; max-width: 1800px;
+      }}
+
+      /* ---- App header bar — DARK orange anchor ---- */
+      .hitlo-header {{
+          display: flex; align-items: center; gap: 14px;
+          padding: 16px 24px; margin: 0 0 1.6rem 0;
+          background: linear-gradient(110deg, {ACCENT_DEEP} 0%, {ACCENT_DK} 55%, {ACCENT} 100%);
+          border: none; border-radius: 14px;
+          box-shadow: 0 4px 16px rgba(122,58,10,0.28);
+      }}
+      .hitlo-logo {{
+          width: 38px; height: 38px; border-radius: 10px;
+          background: rgba(255,255,255,0.18);
+          border: 1px solid rgba(255,255,255,0.25);
+          display: flex; align-items: center; justify-content: center;
+          font-size: 20px;
+      }}
+      .hitlo-title {{ font-family:'Space Grotesk'; font-weight:700;
+          font-size: 1.32rem; color: #FFFFFF; line-height: 1; }}
+      .hitlo-sub {{ color: rgba(255,255,255,0.85); font-size: 0.78rem;
+          margin-top: 4px; letter-spacing: 0.02em; font-weight: 600; }}
+      .hitlo-badge {{ margin-left: auto; padding: 6px 14px; border-radius: 20px;
+          background: rgba(255,255,255,0.20); border: 1px solid rgba(255,255,255,0.35);
+          color: #FFFFFF; font-size: 0.74rem; font-weight: 700; }}
+
+      /* ---- Metric cards ---- */
+      div[data-testid="stMetric"] {{
+          background: {PANEL}; border: 1px solid {BORDER};
+          border-left: 4px solid {ACCENT}; border-radius: 12px;
+          padding: 16px 18px; box-shadow: 0 1px 4px rgba(122,58,10,0.06);
+      }}
+      div[data-testid="stMetric"] label p {{ color: {MUTED} !important;
+          font-size: 0.76rem !important; font-weight: 600 !important;
+          text-transform: uppercase; letter-spacing: 0.04em; }}
+      div[data-testid="stMetricValue"] {{ font-family:'Space Grotesk';
+          font-weight: 700; color: {ACCENT_DK} !important; }}
+
+      /* ---- Buttons ---- */
+      .stButton button[kind="primary"] {{
+          background: {ACCENT}; color: #2A1505; border: none;
+          font-weight: 600; border-radius: 10px; padding: 0.5rem 1rem;
+      }}
+      .stButton button[kind="primary"]:hover {{ background: #CF6520; }}
+      .stButton button[kind="secondary"] {{
+          background: {PANEL_2}; color: {TEXT};
+          border: 1px solid {BORDER}; border-radius: 10px;
+      }}
+
+      /* ---- Expanders & containers ---- */
+      div[data-testid="stExpander"] {{
+          border: 1px solid {BORDER}; border-radius: 14px;
+          background: {PANEL}; overflow: hidden;
+      }}
+      div[data-testid="stExpander"] summary {{ font-weight: 600; }}
+      /* bordered st.container -> white card lifting off peach bg */
+      div[data-testid="stVerticalBlockBorderWrapper"] {{
+          background: {PANEL}; border: 1px solid {BORDER} !important;
+          border-radius: 16px !important;
+          box-shadow: 0 2px 10px rgba(122,58,10,0.07);
+      }}
+
+      /* ---- Sidebar ---- */
+      section[data-testid="stSidebar"] {{
+          background: {PANEL}; border-right: 1px solid {BORDER};
+      }}
+      section[data-testid="stSidebar"] h1,
+      section[data-testid="stSidebar"] h2 {{ font-size: 1rem; }}
+      /* bigger sidebar nav links */
+      [data-testid="stSidebarNav"] a {{
+          font-size: 1.02rem !important; font-weight: 600 !important;
+          padding: 8px 12px !important;
+      }}
+      [data-testid="stSidebarNav"] a span {{ font-size: 1.02rem !important; }}
+
+      /* ---- Tables ---- */
+      div[data-testid="stDataFrame"] {{ border-radius: 12px; overflow: hidden; }}
+
+      /* ---- Recolor Streamlit's blue accents to orange/white ---- */
+      /* info / notice boxes (st.info) -> orange tint.
+         st.error stays red, st.warning amber, st.success green — so safety
+         alerts still stand out. We target the info variant specifically. */
+      div[data-testid="stAlert"][kind="info"],
+      div[data-baseweb="notification"][kind="info"] {{
+          background: rgba(232,119,46,0.10) !important;
+          border: 1px solid rgba(232,119,46,0.35) !important;
+          border-radius: 12px !important;
+      }}
+      div[data-testid="stAlert"][kind="info"] strong {{
+          color: {ACCENT} !important;
+      }}
+      /* If kind attribute isn't present, fall back: any alert that is the
+         default blue gets the orange tint. Errors/warnings override via
+         their own stronger Streamlit classes. */
+      .stAlert {{ border-radius: 12px !important; }}
+      /* links */
+      a, a:visited {{ color: {ACCENT} !important; }}
+      /* progress bar fill */
+      div[data-testid="stProgress"] div[role="progressbar"] > div {{
+          background: {ACCENT} !important;
+      }}
+      /* slider handle */
+      div[data-testid="stSlider"] div[role="slider"] {{
+          background: {ACCENT} !important;
+      }}
+      /* nav active item */
+      [data-testid="stSidebarNav"] a[aria-current="page"] {{
+          color: {ACCENT} !important;
+      }}
+      /* number-input +/- buttons hover */
+      button[data-testid="stNumberInputStepUp"]:hover,
+      button[data-testid="stNumberInputStepDown"]:hover {{
+          color: {ACCENT} !important; border-color: {ACCENT} !important;
+      }}
+      /* spinner */
+      div[data-testid="stSpinner"] > div {{ border-top-color: {ACCENT} !important; }}
+
+      /* ---- Section label chip — dark orange ---- */
+      .section-chip {{
+          display:inline-block; padding: 4px 13px; border-radius: 7px;
+          background: {ACCENT_DK}; border:1px solid {ACCENT_DEEP}; color:#FFFFFF;
+          font-size: 0.7rem; font-weight:700; letter-spacing:0.07em;
+          text-transform: uppercase; margin-bottom: 8px;
+      }}
+      /* section sub-headers in deep orange for pop */
+      .stMarkdown h3, h3 {{ color: {ACCENT_DK} !important; }}
+      hr {{ border-color: {BORDER}; }}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def render_header(active: str):
+    """Branded top bar with a status badge."""
+    if st.session_state.get('initialized'):
+        cfg = st.session_state.config
+        subj = cfg['Subject']['id'] if cfg else "—"
+        badge = f"● {subj} · {active}"
+    else:
+        badge = f"● {active}"
+    st.markdown(f"""
+    <div class="hitlo-header">
+      <div class="hitlo-logo">🦾</div>
+      <div>
+        <div class="hitlo-title">HITLO&nbsp;Symmetry</div>
+        <div class="hitlo-sub">Human-in-the-Loop Bayesian Optimization · LegExoNET</div>
+      </div>
+      <div class="hitlo-badge">{badge}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def section_chip(label: str):
+    st.markdown(f'<span class="section-chip">{label}</span>',
+                unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Shared sidebar status (shown on every page once initialized)
+# ---------------------------------------------------------------------------
+
+def sidebar_status():
+    if not st.session_state.get('initialized'):
+        st.sidebar.info("System not initialized.\nGo to **Setup** to begin.")
+        return
+    config = st.session_state.config
+    opt = config['Optimization']
+    range_ = np.array(list(opt['range'])).reshape(2, 2)
+    signed = _signed_mode(config)
+    si_target = _si_target(config)
+    baseline_si = st.session_state.baseline_si
+
+    if _is_aim2(config):
+        para = "🩺 Aim 2 — drive to 0"
+    elif not st.session_state.baseline_done:
+        para = "🧪 Aim 1 — baseline pending"
+    elif si_target < 0:
+        para = f"🧪 Aim 1 — target {si_target:+.1f}%"
+    else:
+        para = f"target {si_target:+.1f}%"
+
+    base_line = ("n/a (Aim 2)" if _is_aim2(config)
+                 else (f"{baseline_si:+.1f}%" if baseline_si is not None
+                       else "pending"))
+    st.sidebar.markdown(f"""
+    **Session**
+    `{config['Subject']['id']} · {config['Subject']['session']}`
+
+    **Paradigm**
+    {para}
+
+    **Baseline** {base_line}
+    **Trials** {opt['n_steps']} ({opt['n_exploration']} LHS)
+    **R** {range_[0,0]:.3f}–{range_[1,0]:.3f}  
+    **L₀** {range_[0,1]:.3f}–{range_[1,1]:.3f}
+    """)
+
 
 # ===========================================================================
-# CONFIG EDITOR — first page, shown until the operator saves & continues
+# PAGE 1 — SETUP (config editor + initialize)
 # ===========================================================================
-if not st.session_state.initialized and not st.session_state.config_saved:
-    st.header("⚙️ Experiment Configuration")
-    st.caption("Edit and save the config before starting. Writes to "
-               f"`{_config_path()}`.")
 
-    # If a checkpoint exists, offer to skip straight to the sidebar to resume.
-    _peek = load_config()
-    if _peek is not None and os.path.exists(_checkpoint_path(_peek)):
-        st.warning("⚠️ A checkpoint exists for this subject/session. "
-                   "To resume it, skip editing and use ▶️ Resume in the sidebar.")
-        if st.button("⏭️ Skip to sidebar (resume existing session)"):
-            st.session_state.config_saved = True
+def page_setup():
+    render_header("Setup")
+    section_chip("Step 1 · Configure")
+    st.header("Experiment Configuration")
+
+    # If already initialized, show status + re-init option.
+    if st.session_state.initialized and st.session_state.config_saved:
+        st.success("✅ System initialized. Use **Run Experiment** in the nav.")
+        sidebar_status()
+        if st.button("🔄 Re-initialize / start a new session"):
+            st.session_state.initialized = False
+            st.session_state.config_saved = False
             st.rerun()
-        st.markdown("---")
+        return
 
     _cfg = load_config()
     if _cfg is None:
-        st.error("No config file found to load defaults from. Expected "
-                 "config/exo_symmetry_config.yml. Create one, or fill the "
-                 "fields below and save.")
+        st.error("No config found. Defaults loaded — edit and save.")
         _cfg = {
             'Subject': {'id': 'P001', 'session': 'S001',
                         'base_dir': '/Users/maccamardo/HITLO_Data'},
-            'Cost': {'sample_rate': 200, 'time': 90, 'signed': True,
-                     'si_target': -10.0, 'trim_seconds': 3.0},
+            'Cost': {'aim': 'Aim 1', 'sample_rate': 200, 'time': 90,
+                     'signed': True, 'si_target': -10.0, 'trim_seconds': 3.0},
             'Optimization': {
                 'n_parms': 2, 'n_steps': 15, 'n_exploration': 5,
                 'range': [[0.24, 0.30], [0.35, 0.40]],
                 'device': 'cpu', 'normalize': True, 'acquisition': 'ei',
-                'kernel_function': 'se',
-                'model_save_path': 'auto', 'result_save_path': 'auto',
-                'pf_zone_deg': [2, 20.0], 'pf_torque_threshold': 4.0,
-                'min_df_torque_nm': 20, 'df_check_angle_deg': -10.0,
-                'df_min_bo_nm': 0, 'lambda_pf': 0, 'mu_df': 0,
-            },
+                'kernel_function': 'se', 'model_save_path': 'auto',
+                'result_save_path': 'auto', 'pf_zone_deg': [2, 20.0],
+                'pf_torque_threshold': 4.0, 'min_df_torque_nm': 20,
+                'df_check_angle_deg': -10.0, 'df_min_bo_nm': 0,
+                'lambda_pf': 0, 'mu_df': 0},
         }
-
     subj = _cfg.setdefault('Subject', {})
     cost = _cfg.setdefault('Cost', {})
     opt = _cfg.setdefault('Optimization', {})
 
-    st.subheader("👤 Subject")
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1:
-        subj['id'] = st.text_input("Participant ID",
-                                   value=str(subj.get('id', 'P001')))
-    with cc2:
-        subj['session'] = st.text_input("Session",
-                                        value=str(subj.get('session', 'S001')))
-    with cc3:
-        subj['base_dir'] = st.text_input(
-            "Base data dir",
-            value=str(subj.get('base_dir', '/Users/maccamardo/HITLO_Data')))
+    with st.container(border=True):
+        st.subheader("👤 Subject")
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            subj['id'] = st.text_input("Participant ID",
+                                       value=str(subj.get('id', 'P001')))
+        with cc2:
+            subj['session'] = st.text_input(
+                "Session", value=str(subj.get('session', 'S001')))
+        with cc3:
+            subj['base_dir'] = st.text_input(
+                "Base data dir",
+                value=str(subj.get('base_dir', '/Users/maccamardo/HITLO_Data')))
 
-    st.subheader("🎯 Paradigm")
+    with st.container(border=True):
+        st.subheader("🎯 Paradigm")
+        _aim_options = ["Aim 1 — healthy (induce asymmetry, baseline-relative)",
+                        "Aim 2 — stroke (drive to symmetry, target = 0)"]
+        _saved_aim = cost.get('aim', 'Aim 1')
+        _idx = 1 if str(_saved_aim).startswith('Aim 2') else 0
+        aim_choice = st.radio("Experiment aim", _aim_options, index=_idx,
+                              horizontal=True)
+        is_aim2 = aim_choice.startswith("Aim 2")
+        cost['aim'] = "Aim 2" if is_aim2 else "Aim 1"
 
-    # Aim selector decides whether the baseline phase runs.
-    #   Aim 1 healthy  -> baseline phase runs; target = baseline - displacement
-    #   Aim 2 stroke   -> NO baseline; target is fixed at 0 (drive to symmetry)
-    _aim_options = ["Aim 1 — healthy (induce asymmetry, baseline-relative)",
-                    "Aim 2 — stroke (drive to symmetry, target = 0)"]
-    _saved_aim = cost.get('aim', 'Aim 1')
-    _aim_default_idx = 1 if str(_saved_aim).startswith('Aim 2') else 0
-    aim_choice = st.radio("Experiment aim", _aim_options,
-                          index=_aim_default_idx, horizontal=True)
-    is_aim2 = aim_choice.startswith("Aim 2")
-    cost['aim'] = "Aim 2" if is_aim2 else "Aim 1"
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            cost['signed'] = st.checkbox(
+                "Signed (two shank sensors)",
+                value=bool(cost.get('signed', True)),
+                help="Required for both aims.")
+        with pc2:
+            if is_aim2:
+                cost['si_target'] = 0.0
+                st.number_input("si_target (%)", value=0.0, disabled=True,
+                                help="Aim 2: fixed at 0. No baseline phase.")
+            else:
+                cost['si_target'] = st.number_input(
+                    "Fallback si_target (%)",
+                    value=float(cost.get('si_target', -10.0)),
+                    min_value=-50.0, max_value=50.0, step=1.0,
+                    help="Baseline phase overrides this.")
+        with pc3:
+            cost['time'] = st.number_input(
+                "Trial duration (s)", value=int(cost.get('time', 90)),
+                min_value=10, max_value=600, step=5)
 
-    pc1, pc2, pc3 = st.columns(3)
-    with pc1:
-        cost['signed'] = st.checkbox("Signed (two shank sensors)",
-                                     value=bool(cost.get('signed', True)),
-                                     help="Required for both aims — signed SI "
-                                          "is needed to drive toward 0 or a "
-                                          "negative target.")
-    with pc2:
         if is_aim2:
-            cost['si_target'] = 0.0
-            st.number_input("si_target (%)", value=0.0, disabled=True,
-                            help="Aim 2 stroke: fixed at 0 (drive to "
-                                 "symmetry). No baseline phase.")
+            st.info("🩺 **Aim 2 stroke:** baseline skipped, target = 0.")
         else:
-            cost['si_target'] = st.number_input(
-                "Fallback si_target (%)",
-                value=float(cost.get('si_target', -10.0)),
-                min_value=-50.0, max_value=50.0, step=1.0,
-                help="Used only if you skip the baseline phase. The baseline "
-                     "phase overrides this with baseline − displacement.")
-    with pc3:
-        cost['time'] = st.number_input("Trial duration (s)",
-                                       value=int(cost.get('time', 90)),
-                                       min_value=10, max_value=600, step=5)
+            st.info("🧪 **Aim 1 healthy:** baseline phase runs first "
+                    "(Pre run-002), target = baseline − displacement.")
 
-    if is_aim2:
-        st.info("🩺 **Aim 2 stroke:** baseline phase is **skipped**. "
-                "Optimization drives SI toward **0** (symmetric gait) "
-                "automatically.")
-    else:
-        st.info("🧪 **Aim 1 healthy:** a baseline phase will run first "
-                "(Pre run-002), then the target is set to "
-                "**baseline − displacement**.")
+        pc4, pc5 = st.columns(2)
+        with pc4:
+            cost['sample_rate'] = st.number_input(
+                "Sample rate (Hz)", value=int(cost.get('sample_rate', 200)),
+                min_value=50, max_value=1000, step=10)
+        with pc5:
+            cost['trim_seconds'] = st.number_input(
+                "Trim each end (s)",
+                value=float(cost.get('trim_seconds', 3.0)),
+                min_value=0.0, max_value=30.0, step=0.5)
 
-    pc4, pc5 = st.columns(2)
-    with pc4:
-        cost['sample_rate'] = st.number_input(
-            "Sample rate (Hz)", value=int(cost.get('sample_rate', 200)),
-            min_value=50, max_value=1000, step=10)
-    with pc5:
-        cost['trim_seconds'] = st.number_input(
-            "Trim each end (s)", value=float(cost.get('trim_seconds', 3.0)),
-            min_value=0.0, max_value=30.0, step=0.5)
+    with st.container(border=True):
+        st.subheader("🔬 Optimization")
+        oc1, oc2, oc3 = st.columns(3)
+        with oc1:
+            opt['n_steps'] = st.number_input(
+                "Total trials", value=int(opt.get('n_steps', 15)),
+                min_value=1, max_value=100, step=1)
+        with oc2:
+            opt['n_exploration'] = st.number_input(
+                "Exploration (LHS)", value=int(opt.get('n_exploration', 5)),
+                min_value=1, max_value=50, step=1)
+        with oc3:
+            opt['normalize'] = st.checkbox(
+                "Normalize", value=bool(opt.get('normalize', True)))
 
-    st.subheader("🔬 Optimization")
-    oc1, oc2, oc3 = st.columns(3)
-    with oc1:
-        opt['n_steps'] = st.number_input("Total trials",
-                                         value=int(opt.get('n_steps', 15)),
-                                         min_value=1, max_value=100, step=1)
-    with oc2:
-        opt['n_exploration'] = st.number_input(
-            "Exploration trials (LHS)",
-            value=int(opt.get('n_exploration', 5)),
-            min_value=1, max_value=50, step=1)
-    with oc3:
-        opt['normalize'] = st.checkbox("Normalize",
-                                       value=bool(opt.get('normalize', True)))
+        st.markdown("**Parameter ranges**")
+        rng = np.array(opt.get('range', [[0.24, 0.30], [0.35, 0.40]]),
+                       dtype=float)
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        with rc1:
+            r_min = st.number_input("R min (m)", value=float(rng[0, 0]),
+                                    step=0.01, format="%.4f")
+        with rc2:
+            r_max = st.number_input("R max (m)", value=float(rng[1, 0]),
+                                    step=0.01, format="%.4f")
+        with rc3:
+            l_min = st.number_input("L₀ min (m)", value=float(rng[0, 1]),
+                                    step=0.01, format="%.4f")
+        with rc4:
+            l_max = st.number_input("L₀ max (m)", value=float(rng[1, 1]),
+                                    step=0.01, format="%.4f")
+        opt['range'] = [[r_min, l_min], [r_max, l_max]]
 
-    st.markdown("**Parameter ranges**")
-    rng = np.array(opt.get('range', [[0.24, 0.30], [0.35, 0.40]]),
-                   dtype=float)
-    rc1, rc2, rc3, rc4 = st.columns(4)
-    with rc1:
-        r_min = st.number_input("R min (m)", value=float(rng[0, 0]),
-                                step=0.01, format="%.4f")
-    with rc2:
-        r_max = st.number_input("R max (m)", value=float(rng[1, 0]),
-                                step=0.01, format="%.4f")
-    with rc3:
-        l_min = st.number_input("L₀ min (m)", value=float(rng[0, 1]),
-                                step=0.01, format="%.4f")
-    with rc4:
-        l_max = st.number_input("L₀ max (m)", value=float(rng[1, 1]),
-                                step=0.01, format="%.4f")
-    opt['range'] = [[r_min, l_min], [r_max, l_max]]
-
-    with st.expander("⚙️ Advanced safety / torque settings"):
-        sc1, sc2, sc3 = st.columns(3)
-        with sc1:
-            opt['pf_torque_threshold'] = st.number_input(
-                "PF zone cap (Nm)",
-                value=float(opt.get('pf_torque_threshold', 4.0)), step=0.5)
-            opt['df_min_bo_nm'] = st.number_input(
-                "DF min during BO (Nm)",
-                value=float(opt.get('df_min_bo_nm', 0)), step=1.0,
-                help="0 lets BO pick zero-torque configs. Set >0 to force "
-                     "minimum dorsiflexor engagement every BO suggestion.")
-        with sc2:
-            opt['min_df_torque_nm'] = st.number_input(
-                "DF ramp max (Nm, exploration)",
-                value=float(opt.get('min_df_torque_nm', 20)), step=1.0)
-            opt['df_check_angle_deg'] = st.number_input(
-                "DF check angle (deg)",
-                value=float(opt.get('df_check_angle_deg', -10.0)), step=1.0)
-        with sc3:
-            pf_zone = opt.get('pf_zone_deg', [2.0, 20.0])
-            pf_lo = st.number_input("PF zone lo (deg)",
-                                    value=float(pf_zone[0]), step=1.0)
-            pf_hi = st.number_input("PF zone hi (deg)",
-                                    value=float(pf_zone[1]), step=1.0)
-            opt['pf_zone_deg'] = [pf_lo, pf_hi]
+        with st.expander("⚙️ Advanced safety / torque settings"):
+            sc1, sc2, sc3 = st.columns(3)
+            with sc1:
+                opt['pf_torque_threshold'] = st.number_input(
+                    "PF zone cap (Nm)",
+                    value=float(opt.get('pf_torque_threshold', 4.0)), step=0.5)
+                opt['df_min_bo_nm'] = st.number_input(
+                    "DF min during BO (Nm)",
+                    value=float(opt.get('df_min_bo_nm', 0)), step=1.0,
+                    help="0 lets BO pick zero-torque configs.")
+            with sc2:
+                opt['min_df_torque_nm'] = st.number_input(
+                    "DF ramp max (Nm)",
+                    value=float(opt.get('min_df_torque_nm', 20)), step=1.0)
+                opt['df_check_angle_deg'] = st.number_input(
+                    "DF check angle (deg)",
+                    value=float(opt.get('df_check_angle_deg', -10.0)), step=1.0)
+            with sc3:
+                pf_zone = opt.get('pf_zone_deg', [2.0, 20.0])
+                pf_lo = st.number_input("PF zone lo (deg)",
+                                        value=float(pf_zone[0]), step=1.0)
+                pf_hi = st.number_input("PF zone hi (deg)",
+                                        value=float(pf_zone[1]), step=1.0)
+                opt['pf_zone_deg'] = [pf_lo, pf_hi]
 
     st.markdown("---")
-    bc1, bc2 = st.columns([1, 1])
+    bc1, bc2, bc3 = st.columns([1, 1, 1])
     with bc1:
-        if st.button("💾 Save config & continue", type="primary",
-                     width="stretch"):
+        if st.button("💾 Save config", type="primary", width="stretch"):
             if save_config_to_disk(_cfg):
                 st.session_state.config_saved = True
-                st.success("✅ Config saved. Continue in the sidebar.")
+                st.success("✅ Saved.")
                 st.rerun()
     with bc2:
-        if st.button("⏭️ Use existing config (skip editing)",
-                     width="stretch"):
+        if st.button("⏭️ Use existing config", width="stretch"):
             st.session_state.config_saved = True
             st.rerun()
+    with bc3:
+        if st.button("🚀 Initialize system", type="primary", width="stretch",
+                     disabled=not st.session_state.config_saved):
+            ok, _ = initialize_system(fresh_start=True)
+            if ok:
+                st.success("✅ Initialized! Go to **Run Experiment**.")
+                st.rerun()
+
+    if not st.session_state.config_saved:
+        st.caption("Save (or use existing) config to enable Initialize.")
 
     with st.expander("📄 Preview YAML"):
         st.code(yaml.safe_dump(_cfg, sort_keys=False), language="yaml")
 
-    st.stop()   # Gate: nothing else renders until config is saved/skipped
 
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    _cfg_peek = load_config()
-    _has_ckpt = (bool(_cfg_peek and os.path.exists(_checkpoint_path(_cfg_peek)))
-                 if _cfg_peek else False)
+# ===========================================================================
+# PAGE 2 — RUN EXPERIMENT (sensors + baseline + trial loop)
+# ===========================================================================
 
-    if _has_ckpt and not st.session_state.initialized:
-        st.warning("⚠️ Checkpoint found!")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("▶️ Resume", width="stretch", type="primary"):
-                ok, _ = initialize_system(fresh_start=False)
-                if ok:
-                    st.success("✅ Resumed!")
-                    st.rerun()
-        with col_b:
-            if st.button("🆕 Fresh Start", width="stretch"):
-                ok, _ = initialize_system(fresh_start=True)
-                if ok:
-                    st.success("✅ Started fresh!")
-                    st.rerun()
-    else:
-        if st.button("🔄 Initialize/Reset System", width="stretch"):
-            ok, _ = initialize_system(fresh_start=True)
-            if ok:
-                st.success("✅ System initialized!")
-                st.rerun()
-            else:
-                st.error("❌ Initialization failed!")
+def page_run():
+    render_header("Run")
+    sidebar_status()
 
-    if st.session_state.initialized:
-        config = st.session_state.config
-        opt = config['Optimization']
-        range_ = np.array(list(opt['range'])).reshape(2, 2)
-        signed = _signed_mode(config)
-        si_target = _si_target(config)
-        trim_s = config['Cost'].get('trim_seconds', 3.0)
-        baseline_si = st.session_state.baseline_si
+    if not st.session_state.initialized:
+        st.warning("System not initialized. Go to **Setup** first.")
+        return
 
-        if signed:
-            if _is_aim2(config):
-                paradigm_str = ("🩺 **Aim 2 stroke — drive SI toward 0** "
-                                "(no baseline; minimize asymmetry)")
-            elif not st.session_state.baseline_done:
-                paradigm_str = ("🧪 **Aim 1 — baseline pending.** Target is "
-                                "set after baseline measurement.")
-            elif si_target < 0.0:
-                paradigm_str = (f"🧪 **Drive SI toward {si_target:+.1f}%** "
-                                f"(Aim 1 healthy — induce target asymmetry)")
-            elif si_target == 0.0:
-                paradigm_str = "🩺 **Drive SI toward 0** (minimize asymmetry)"
-            else:
-                paradigm_str = f"⚙️ **Drive SI toward {si_target:+.1f}%** (custom)"
-        else:
-            paradigm_str = "📐 **Minimize |cost|** (unsigned / legacy)"
+    config = st.session_state.config
+    signed = _signed_mode(config)
 
-        base_line = ("n/a (Aim 2)" if _is_aim2(config)
-                     else (f"{baseline_si:+.1f}%" if baseline_si is not None
-                           else "not yet measured"))
-        st.info(f"""
-        **Experiment Settings:**
-        - {paradigm_str}
-        - Baseline SI: {base_line}
-        - Total Trials: {opt['n_steps']}
-        - Exploration: {opt['n_exploration']} (LHS)
-        - Symmetry: {'Signed (two sensors)' if signed else 'Unsigned (sternum)'}
-        - Trim: {trim_s:.1f}s each end
-        - R range: {range_[0,0]} → {range_[1,0]}
-        - L₀ range: {range_[0,1]} → {range_[1,1]}
-        - Trial Duration: {config['Cost']['time']}s
-        """)
-
-        # Paradigm confirmation (only meaningful once a target is locked).
-        if signed and st.session_state.baseline_done:
-            if si_target <= -3.0:
-                st.info(
-                    f"🧪 **Aim 1 perturbation active.** Driving healthy gait "
-                    f"toward {si_target:+.1f}% "
-                    f"(baseline {baseline_si:+.1f}%, "
-                    f"displacement {st.session_state.baseline_displacement:.0f}%) "
-                    f"— the intended induced-asymmetry protocol."
-                )
-            elif si_target >= 3.0:
-                st.warning(
-                    f"⚠️ Target {si_target:+.1f}% is **positive** — for a "
-                    f"left-side device the expected direction is negative. "
-                    f"Confirm the sign is intentional."
-                )
-
-        st.markdown("---")
-        if st.session_state.results:
-            if st.button("💾 Export Results", width="stretch"):
-                df = pd.DataFrame(st.session_state.results)
-                csv = df.to_csv(index=False)
-                st.download_button(label="Download CSV", data=csv,
-                                   file_name="hil_results.csv", mime="text/csv")
-
-if not st.session_state.initialized:
-    st.info("👈 Click **Initialize/Reset System** in the sidebar to begin")
-    st.stop()
-
-# Live sensor monitoring
-st.subheader("📡 Live Polar H10 Sensors (Left + Right Shank)")
-
-connect_to_lsl()
-
-
-@st.fragment(run_every=5.0)
-def live_sensor_fragment():
-    for side in ['left', 'right']:
-        inlet = st.session_state[f'lsl_inlet_{side}']
-        if inlet is not None:
-            try:
-                inlet.pull_chunk(timeout=0.0, max_samples=1)
-            except Exception:
-                st.session_state[f'lsl_inlet_{side}'] = None
-
+    # ---- Live sensors ----
+    section_chip("Sensors")
+    st.subheader("📡 Live Polar H10 — Left + Right Shank")
     connect_to_lsl()
-    sample_rate = st.session_state.config['Cost']['sample_rate']
 
-    col_l, col_r = st.columns(2)
-
-    for side, col in [('left', col_l), ('right', col_r)]:
-        inlet = st.session_state[f'lsl_inlet_{side}']
-        store = st.session_state[f'live_data_{side}']
-        with col:
+    @st.fragment(run_every=5.0)
+    def _live():
+        for side in ['left', 'right']:
+            inlet = st.session_state[f'lsl_inlet_{side}']
             if inlet is not None:
-                update_live_data(inlet, store)
-                n = len(store['time'])
-                st.success(f"✅ {side.capitalize()} connected  |  {n} samples")
-                fig = plot_live_sensor(store, f'polar accel {side}', sample_rate)
-                if fig:
-                    st.plotly_chart(fig, width="stretch")
-                else:
-                    st.info(f"⏳ Collecting {side} data...")
-            else:
-                st.warning(f"⚠️ {side.capitalize()} sensor not found")
-                if st.button(f"🔄 Reconnect {side}", key=f"reconnect_{side}"):
+                try:
+                    inlet.pull_chunk(timeout=0.0, max_samples=1)
+                except Exception:
                     st.session_state[f'lsl_inlet_{side}'] = None
-                    st.session_state[f'live_data_{side}'] = {
-                        'time': [], 'x': [], 'y': [], 'z': []}
-                    connect_to_lsl()
-                    st.rerun()
+        connect_to_lsl()
+        sr = st.session_state.config['Cost']['sample_rate']
+        cL, cR = st.columns(2)
+        for side, col in [('left', cL), ('right', cR)]:
+            inlet = st.session_state[f'lsl_inlet_{side}']
+            store = st.session_state[f'live_data_{side}']
+            with col:
+                if inlet is not None:
+                    update_live_data(inlet, store)
+                    st.success(f"✅ {side.capitalize()} · "
+                               f"{len(store['time'])} samples")
+                    fig = plot_live_sensor(store, f'polar accel {side}', sr)
+                    if fig:
+                        st.plotly_chart(fig, width="stretch")
+                    else:
+                        st.info(f"⏳ Collecting {side}…")
+                else:
+                    st.warning(f"⚠️ {side.capitalize()} not found")
+                    if st.button(f"🔄 Reconnect {side}", key=f"rc_{side}"):
+                        st.session_state[f'lsl_inlet_{side}'] = None
+                        st.session_state[f'live_data_{side}'] = {
+                            'time': [], 'x': [], 'y': [], 'z': []}
+                        connect_to_lsl()
+                        st.rerun()
+    _live()
 
-
-live_sensor_fragment()
-
-if st.session_state.initialized:
     missing = []
     if st.session_state.lsl_inlet_left is None:
         missing.append('LEFT')
     if st.session_state.lsl_inlet_right is None:
         missing.append('RIGHT')
     if missing:
-        st.error(f"🚨 **SENSOR DISCONNECTED** — {', '.join(missing)} sensor(s) "
-                 f"lost. Do NOT start a trial.")
+        st.error(f"🚨 SENSOR DISCONNECTED — {', '.join(missing)}. "
+                 f"Do NOT start a trial.")
+    st.markdown("---")
 
-st.markdown("---")
+    # ---- Aim 2: force target 0, skip baseline ----
+    if _is_aim2(config):
+        if not st.session_state.baseline_done:
+            config['Cost']['si_target'] = 0.0
+            st.session_state.cost_extractor.si_target = 0.0
+            st.session_state.hil.si_target = 0.0
+            st.session_state.hil._bo_direction_str = "|SI - 0.0|"
+            st.session_state.baseline_si = None
+            st.session_state.baseline_displacement = None
+            st.session_state.baseline_done = True
+            save_checkpoint()
 
-config = st.session_state.config
-signed = _signed_mode(config)
+    # ---- Baseline phase (Aim 1) ----
+    if signed and not _is_aim2(config) and not st.session_state.baseline_done:
+        _baseline_phase(config)
+        return
 
-# ===========================================================================
-# BASELINE PHASE — Aim 1 only. Aim 2 stroke skips straight to optimization.
-# ===========================================================================
-if _is_aim2(config):
-    # Aim 2: no baseline. Force target 0 and mark baseline complete so the
-    # optimization phase unlocks immediately.
-    if not st.session_state.baseline_done:
-        config['Cost']['si_target'] = 0.0
-        st.session_state.cost_extractor.si_target = 0.0
-        st.session_state.hil.si_target = 0.0
-        st.session_state.hil._bo_direction_str = "|SI - 0.0|"
-        st.session_state.baseline_si = None
-        st.session_state.baseline_displacement = None
-        st.session_state.baseline_done = True
-        save_checkpoint()
+    # ---- Optimization phase ----
+    _optimization_phase(config, signed)
 
-if signed and not _is_aim2(config) and not st.session_state.baseline_done:
+
+def _baseline_phase(config):
+    section_chip("Step 2 · Baseline")
     st.header("📏 Baseline Measurement")
     st.info(
-        "Two Pre trials:\n\n"
-        f"• **Pre run-{BASELINE_IGNORE_RUN:03d}** — no-device familiarization. "
-        f"**Ignored** (not analyzed).\n\n"
-        f"• **Pre run-{BASELINE_TRIAL_RUN:03d}** — THE baseline trial "
-        f"(band slack / no perturbation). Its signed SI sets the target:\n\n"
-        "**target = baseline − displacement** (pushed more negative)."
-    )
+        f"**Pre run-{BASELINE_IGNORE_RUN:03d}** — familiarization, **ignored**. "
+        f"**Pre run-{BASELINE_TRIAL_RUN:03d}** — THE baseline trial. "
+        f"Target = baseline − displacement.")
 
     base_fn = baseline_filename(BASELINE_TRIAL_RUN)
     ignore_fn = baseline_filename(BASELINE_IGNORE_RUN)
 
-    st.subheader("📝 Baseline Instructions")
-    with st.expander("**Step-by-step**", expanded=True):
+    with st.expander("📝 Instructions", expanded=True):
         st.markdown(f"""
-        **1. Familiarization (ignored):**
-        - Subject walks (no device).
-        - LabRecorder: **Block/Task = `{BASELINE_TASK}`**, **Run = `{BASELINE_IGNORE_RUN}`**
-        - File: `{ignore_fn}` — recorded for completeness, **not analyzed**.
+        **1. Familiarization (ignored):** no device · Block/Task = `{BASELINE_TASK}` ·
+        Run = `{BASELINE_IGNORE_RUN}` → `{ignore_fn}`
 
-        **2. Baseline trial (this sets the target):**
-        - Subject walks with **band slack / no perturbation**.
-        - LabRecorder: **Block/Task = `{BASELINE_TASK}`**, **Run = `{BASELINE_TRIAL_RUN}`**
-        - File: `{base_fn}`
-        - Save location: `{st.session_state.cost_extractor.trial_data_dir}`
-        - Walk for {config['Cost']['time']} s, then Stop.
+        **2. Baseline trial:** band slack · Block/Task = `{BASELINE_TASK}` ·
+        Run = `{BASELINE_TRIAL_RUN}` → `{base_fn}` ·
+        save to `{st.session_state.cost_extractor.trial_data_dir}`
+        · walk {config['Cost']['time']} s.
 
-        **3. Click "Analyze baseline" below** — uses run-{BASELINE_TRIAL_RUN:03d} only.
+        **3. Analyze run-002 below.**
         """)
 
     if st.session_state.baseline_si is not None:
-        st.success(f"**Baseline SI (run-{BASELINE_TRIAL_RUN:03d}): "
-                   f"{st.session_state.baseline_si:+.2f}%**")
+        st.success(f"Baseline SI (run-{BASELINE_TRIAL_RUN:03d}): "
+                   f"**{st.session_state.baseline_si:+.2f}%**")
 
     cb1, cb2, cb3 = st.columns(3)
     with cb1:
-        disp = st.number_input("Displacement (%)", value=10.0,
-                               min_value=1.0, max_value=30.0, step=1.0,
-                               key="baseline_disp_input")
+        disp = st.number_input("Displacement (%)", value=10.0, min_value=1.0,
+                               max_value=30.0, step=1.0, key="bl_disp")
     with cb2:
-        file_ready = baseline_file_exists(BASELINE_TRIAL_RUN)
-        if file_ready:
+        ready = baseline_file_exists(BASELINE_TRIAL_RUN)
+        if ready:
             st.success(f"✅ Found {base_fn}")
         else:
             st.warning(f"⏳ Waiting for {base_fn}")
         if st.button("📊 Analyze baseline (run-002)", type="primary",
-                     width="stretch", disabled=not file_ready):
+                     width="stretch", disabled=not ready):
             si = analyze_baseline(BASELINE_TRIAL_RUN)
             if si is None:
-                st.error(f"❌ {base_fn} not found or analysis failed.")
+                st.error("Analysis failed.")
             else:
                 st.session_state.baseline_si = si
-                st.success(f"Baseline SI = {si:+.2f}%")
                 st.rerun()
     with cb3:
-        lock_disabled = (st.session_state.baseline_si is None)
-        if st.button("✅ Lock target & start optimization",
-                     width="stretch", disabled=lock_disabled):
+        locked = (st.session_state.baseline_si is None)
+        if st.button("✅ Lock target & start", width="stretch",
+                     disabled=locked):
             base = float(st.session_state.baseline_si)
             target = compute_baseline_target(base, float(disp))
             st.session_state.baseline_displacement = float(disp)
-            st.session_state.config['Cost']['si_target'] = target
+            config['Cost']['si_target'] = target
             st.session_state.cost_extractor.si_target = target
             st.session_state.hil.si_target = target
             st.session_state.hil._bo_direction_str = f"|SI - {target:+.1f}|"
             st.session_state.baseline_done = True
             save_checkpoint()
-            st.success(f"Baseline {base:+.2f}% → target {target:+.2f}%. "
-                       f"Starting optimization!")
             st.rerun()
 
-    # Preview the target the lock button will set.
     if st.session_state.baseline_si is not None:
-        preview_target = compute_baseline_target(
-            float(st.session_state.baseline_si), float(disp))
-        st.caption(f"→ Will set target = {st.session_state.baseline_si:+.2f}% "
-                   f"− {disp:.0f}% = **{preview_target:+.2f}%**")
-    else:
-        st.warning("Analyze the baseline trial (run-002) before locking.")
+        pv = compute_baseline_target(float(st.session_state.baseline_si),
+                                     float(disp))
+        st.caption(f"→ target = {st.session_state.baseline_si:+.2f}% "
+                   f"− {disp:.0f}% = **{pv:+.2f}%**")
 
-    if st.button("🔍 Check for baseline file"):
-        st.rerun()
 
-    st.stop()   # Gate: optimization UI does not render until baseline locked
+def _optimization_phase(config, signed):
+    hil = st.session_state.hil
+    trial_num = st.session_state.current_trial + 1
+    n_steps = config['Optimization']['n_steps']
+    n_exploration = config['Optimization']['n_exploration']
+    si_target = _si_target(config)
+
+    if trial_num > n_steps:
+        st.success("🎉 OPTIMIZATION COMPLETE — see **Results**.")
+        return
+
+    section_chip(f"Step 3 · Trial {trial_num} of {n_steps}")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        if trial_num <= n_exploration:
+            st.subheader(f"🎲 Exploration {trial_num}/{n_exploration}")
+        else:
+            st.subheader(f"🧠 Bayesian Optimization "
+                         f"{trial_num - n_exploration}/{n_steps - n_exploration}")
+    with c2:
+        st.progress((trial_num - 1) / n_steps,
+                    text=f"{int((trial_num-1)/n_steps*100)}%")
+
+    # Generate next BO suggestion if needed
+    if hil.n >= len(hil.x):
+        if len(hil.x_opt) >= n_exploration:
+            try:
+                if config['Optimization']['normalize']:
+                    nx = hil._normalize_x(hil.x_opt)
+                    ny = hil._mean_normalize_y(hil.y_opt)
+                    raw = hil.BO.run(nx.reshape(len(hil.x_opt), -1),
+                                     ny.reshape(len(hil.x_opt), 1))
+                    raw = hil._denormalize_x(raw)
+                else:
+                    yb = (-np.abs(hil.y_opt - si_target) if signed
+                          else -hil.y_opt)
+                    raw = hil.BO.run(hil.x_opt.reshape(len(hil.x_opt), -1),
+                                     yb.reshape(len(hil.y_opt), -1))
+                newp = hil._get_safe_bo_suggestion(raw)
+                hil.x = np.concatenate((hil.x, newp.reshape(
+                    1, config['Optimization']['n_parms'])), axis=0)
+            except Exception as e:
+                st.error(f"BO suggestion failed: {e}")
+                return
+        else:
+            st.error("Parameter index out of bounds — reinitialize.")
+            return
+
+    params = hil.x[hil.n]
+
+    mc1, mc2 = st.columns(2)
+    mc1.metric("R (m)", f"{params[0]:.4f}")
+    mc2.metric("L₀ (m)", f"{params[1]:.4f}")
+
+    st.plotly_chart(plot_torque_curve(R=params[0], L0=params[1]),
+                    width="stretch")
+
+    # --- QC metrics hidden per user request (kept for easy restore) ---
+    # angles_check, torques_check = compute_torque_curve(params[0], params[1])
+    # pf_zone = config['Optimization'].get('pf_zone_deg', [2.0, 20.0])
+    # pf_mask = (angles_check >= pf_zone[0]) & (angles_check <= pf_zone[1])
+    # pf_rms = np.sqrt(np.mean(torques_check[pf_mask] ** 2))
+    # dfa = config['Optimization'].get('df_check_angle_deg', -10.0)
+    # df_pk = float(np.interp(dfa, angles_check, torques_check))
+    # pen = compute_spring_penalty(
+    #     params[0], params[1],
+    #     lambda_pf=st.session_state.cost_extractor.lambda_pf,
+    #     mu_df=st.session_state.cost_extractor.mu_df)
+    # q1, q2, q3 = st.columns(3)
+    # q1.metric("PF-zone RMS (→0)", f"{pf_rms:.2f} Nm")
+    # q2.metric("Peak DF torque", f"{df_pk:.2f} Nm")
+    # q3.metric("Shape penalty", f"{pen:.4f}")
+
+    with st.expander("📝 LabRecorder steps", expanded=True):
+        st.markdown(f"""
+        1. Enter **R = {params[0]:.4f}**, **L₀ = {params[1]:.4f}** into Computer 2.
+        2. LabRecorder: Block/Task = `Default`, Run = `{trial_num}` →
+           `sub-{config['Subject']['id']}_ses-{config['Subject']['session']}_task-Default_run-{trial_num:03d}_eeg.xdf`
+        3. Walk {config['Cost']['time']} s · Stop · Analyze below.
+        """)
+
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        ok = check_file_exists(trial_num)
+        if ok:
+            st.success(f"✅ run-{trial_num:03d}.xdf")
+        else:
+            st.warning(f"⏳ run-{trial_num:03d}.xdf")
+    with a2:
+        if st.button("🔍 Check file", width="stretch"):
+            st.rerun()
+    with a3:
+        if st.button("▶️ Analyze Trial", type="primary", width="stretch",
+                     disabled=not ok):
+            with st.spinner("Analyzing…"):
+                if analyze_current_trial():
+                    st.rerun()
+                else:
+                    st.error("Analysis failed.")
+
+    # Latest QC inline
+    if st.session_state.results:
+        st.markdown("---")
+        last = st.session_state.results[-1]['trial']
+        fn = trial_filename(config['Subject']['id'],
+                            config['Subject']['session'], last)
+        fp = os.path.join(st.session_state.cost_extractor.trial_data_dir, fn)
+        trim_s = config['Cost'].get('trim_seconds', 3.0)
+        cfg = st.session_state.cost_extractor.detection_cfg
+        res = plot_heelstrikes_last_trial(fp, cfg, trim_seconds=trim_s)
+        if res is not None:
+            hs_fig, hs_warn = res
+            with st.expander(f"🦶 Heel-strike QC — trial {last}", expanded=True):
+                for w in hs_warn:
+                    st.error(w) if "🚨" in w else st.warning(w)
+                if not hs_warn:
+                    st.success("✅ QC clean.")
+                if hs_fig is not None:
+                    st.plotly_chart(hs_fig, width="stretch")
+
 
 # ===========================================================================
-# OPTIMIZATION PHASE
+# PAGE 3 — GP VIEWER (live + load past session)
 # ===========================================================================
-hil = st.session_state.hil
-trial_num = st.session_state.current_trial + 1
-n_steps = config['Optimization']['n_steps']
-si_target = _si_target(config)
 
-if trial_num > n_steps:
-    delete_checkpoint(config)
-    st.success("🎉 **OPTIMIZATION COMPLETE!** 🎉")
-    best_idx = _best_idx(hil.y_opt, config)
+def page_gp_viewer():
+    render_header("GP Viewer")
+    sidebar_status()
+    section_chip("Model Inspection")
+    st.header("🧠 GP Optimization Viewer")
+
+    mode = st.radio("Source", ["Live (current session)",
+                               "Load past session"],
+                    horizontal=True)
+
+    if mode.startswith("Live"):
+        if not st.session_state.initialized:
+            st.warning("No live session. Initialize in **Setup**, or switch "
+                       "to **Load past session**.")
+            return
+        hil = st.session_state.hil
+        n_exp = st.session_state.config['Optimization']['n_exploration']
+        if hil.n < n_exp + 1 or hil.BO.model is None:
+            st.info(f"Live GP appears after exploration "
+                    f"({n_exp} trials) + 1 BO trial. "
+                    f"Currently {hil.n} trials done.")
+            return
+        fig = plot_gp_surface()
+        if fig:
+            st.plotly_chart(fig, width="stretch")
+        if st.session_state.results:
+            st.markdown("---")
+            section_chip("Trial history")
+            df = pd.DataFrame(st.session_state.results)
+            st.dataframe(df[['trial', 'R', 'L0', 'cost', 'phase']],
+                         width="stretch")
+        return
+
+    # ---- Load past session ----
+    base_default = (st.session_state.config['Subject']['base_dir']
+                    if st.session_state.get('config')
+                    else '/Users/maccamardo/HITLO_Data')
     c1, c2, c3 = st.columns(3)
     with c1:
-        if signed:
-            st.metric(f"Best SI (target {si_target:+.1f}%)",
-                      f"{hil.y_opt[best_idx]:+.4f}",
-                      delta=f"Δ {hil.y_opt[best_idx] - si_target:+.4f}",
-                      delta_color="off")
-        else:
-            st.metric("Best Cost", f"{hil.y_opt[best_idx]:.4f}")
+        base_dir = st.text_input("Base dir", value=base_default)
     with c2:
-        st.metric("Best R", f"{hil.x_opt[best_idx][0]:.4f}")
+        subject = st.text_input("Subject", value="P048")
     with c3:
-        st.metric("Best L₀", f"{hil.x_opt[best_idx][1]:.4f}")
-    if st.session_state.baseline_si is not None:
-        st.caption(f"Baseline was {st.session_state.baseline_si:+.2f}%; "
-                   f"target {si_target:+.2f}% "
-                   f"(displacement {st.session_state.baseline_displacement:.0f}%).")
-    st.markdown("---")
-    if (fig := plot_progress()):
-        st.plotly_chart(fig, width="stretch")
-    if (gp_fig := plot_gp_surface()):
-        st.plotly_chart(gp_fig, width="stretch")
-    df = pd.DataFrame(st.session_state.results)
-    st.dataframe(df, width="stretch", height=400)
-    st.stop()
+        session = st.text_input("Session", value="S001")
 
-c1, c2 = st.columns([2, 1])
-with c1:
-    st.header(f"Trial {trial_num}/{n_steps}")
-    n_exploration = config['Optimization']['n_exploration']
-    if trial_num <= n_exploration:
-        st.info(f"**Phase:** 🎲 Exploration (LHS) — "
-                f"trial {trial_num} of {n_exploration}")
-    else:
-        st.success(f"**Phase:** 🧠 Bayesian Optimization — "
-                   f"trial {trial_num - n_exploration} of {n_steps - n_exploration}")
-with c2:
-    progress = (trial_num - 1) / n_steps
-    st.metric("Progress", f"{int(progress * 100)}%")
-    st.progress(progress)
+    _gp_historical_viewer(base_dir, subject, session)
 
-st.markdown("---")
 
-if hil.n >= len(hil.x):
-    if len(hil.x_opt) >= n_exploration:
-        try:
-            if config['Optimization']['normalize']:
-                norm_x = hil._normalize_x(hil.x_opt)
-                norm_y = hil._mean_normalize_y(hil.y_opt)
-                n_obs = len(hil.x_opt)
-                raw = hil.BO.run(norm_x.reshape(n_obs, -1),
-                                 norm_y.reshape(n_obs, 1))
-                raw = hil._denormalize_x(raw)
-            else:
-                n_obs = len(hil.x_opt)
-                if signed:
-                    y_for_bo = -np.abs(hil.y_opt - si_target)
-                else:
-                    y_for_bo = -hil.y_opt
-                raw = hil.BO.run(
-                    hil.x_opt.reshape(n_obs, -1),
-                    y_for_bo.reshape(n_obs, -1))
-            new_parameter = hil._get_safe_bo_suggestion(raw)
-            hil.x = np.concatenate((
-                hil.x, new_parameter.reshape(
-                    1, config['Optimization']['n_parms'])
-            ), axis=0)
-        except Exception as e:
-            st.error(f"BO suggestion failed: {e}")
-            st.stop()
-    else:
-        st.error("Parameter index out of bounds — please reinitialize.")
-        st.stop()
+def _gp_historical_viewer(base_dir, subject, session):
+    """Load saved GP checkpoints from disk and scrub iterations."""
+    import torch
+    from botorch.models import SingleTaskGP
+    from gpytorch.likelihoods import GaussianLikelihood
 
-params = hil.x[hil.n]
+    models_dir = Path(f'{base_dir}/sub-{subject}/ses-{session}/'
+                      f'derivatives/hil_optimization/models')
+    hil_csv = Path(f'{base_dir}/sub-{subject}/ses-{session}/eeg/'
+                   f'sub-{subject}_ses-{session}_hil_results.csv')
 
-st.subheader("📋 Parameters to Enter into Computer 2")
-c1, c2 = st.columns(2)
-with c1:
-    st.markdown(f"### R = `{params[0]:.4f}` m")
-with c2:
-    st.markdown(f"### L₀ = `{params[1]:.4f}` m")
+    if not hil_csv.exists():
+        st.error(f"No results at {hil_csv}")
+        return
+    if not models_dir.exists():
+        st.error(f"No models dir at {models_dir}")
+        return
 
-st.subheader("📈 Predicted Torque-Angle Curve")
-torque_fig = plot_torque_curve(R=params[0], L0=params[1])
-st.plotly_chart(torque_fig, width="stretch")
+    hil_results = pd.read_csv(hil_csv)
+    iter_folders = sorted(
+        [f for f in models_dir.glob('iter_*') if f.is_dir()],
+        key=lambda x: int(x.name.split('_')[1]))
+    if not iter_folders:
+        st.error("No iteration checkpoints found.")
+        return
+    iters = [int(f.name.split('_')[1]) for f in iter_folders]
 
-angles_check, torques_check = compute_torque_curve(params[0], params[1])
-pf_zone = config['Optimization'].get('pf_zone_deg', [2.0, 20.0])
-pf_mask = (angles_check >= pf_zone[0]) & (angles_check <= pf_zone[1])
-pf_rms = np.sqrt(np.mean(torques_check[pf_mask] ** 2))
-df_check_angle = config['Optimization'].get('df_check_angle_deg', -10.0)
-df_torque_peak = float(np.interp(df_check_angle, angles_check, torques_check))
-pen = compute_spring_penalty(
-    params[0], params[1],
-    lambda_pf=st.session_state.cost_extractor.lambda_pf,
-    mu_df=st.session_state.cost_extractor.mu_df)
-mc1, mc2, mc3 = st.columns(3)
-with mc1:
-    st.metric("RMS Torque in PF Zone (want → 0)", f"{pf_rms:.2f} Nm")
-with mc2:
-    st.metric("Torque at Peak DF (want → max)", f"{df_torque_peak:.2f} Nm")
-with mc3:
-    st.metric("Shape Penalty", f"{pen:.4f}")
+    cfg = load_config()
+    rng = (np.array(list(cfg['Optimization']['range'])).reshape(2, 2)
+           if cfg else np.array([[0.24, 0.30], [0.35, 0.40]]))
+    R_MIN, R_MAX = rng[0, 0], rng[1, 0]
+    L0_MIN, L0_MAX = rng[0, 1], rng[1, 1]
 
-st.markdown("---")
+    st.success(f"✅ {len(hil_results)} trials · {len(iters)} checkpoints "
+               f"(iter {min(iters)}–{max(iters)})")
+    sel = st.select_slider("Iteration", options=iters, value=iters[0])
 
-st.subheader("📝 Instructions")
-with st.expander("**Step-by-step guide**", expanded=True):
-    st.markdown(f"""
-    1. **Enter parameters** into Computer 2:
-       - R = {params[0]:.4f}
-       - L₀ = {params[1]:.4f}
+    ipath = models_dir / f'iter_{sel}'
+    try:
+        data = np.loadtxt(ipath / 'data.csv')
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+        Rn, L0n, bo = data[:, 0], data[:, 1], data[:, 2]
+        Rp = Rn * (R_MAX - R_MIN) + R_MIN
+        L0p = L0n * (L0_MAX - L0_MIN) + L0_MIN
+        actual = hil_results['cost'].values[:sel]
 
-    2. **Start LabRecorder:**
-       - Click "Update" — check **polar accel left** and **polar accel right**
-       - Set **Block/Task (%b) = `Default`**  ← optimization trials
-       - Run (%r) = `{trial_num}`
-       - Filename: `sub-{config['Subject']['id']}_ses-{config['Subject']['session']}_task-Default_run-{trial_num:03d}_eeg.xdf`
-       - Save location: `{st.session_state.cost_extractor.trial_data_dir}`
-       - Click "Start"
+        Rg = np.linspace(R_MIN, R_MAX, 40)
+        Lg = np.linspace(L0_MIN, L0_MAX, 40)
+        RR, LL = np.meshgrid(Rg, Lg)
+        Xt = np.column_stack([((RR - R_MIN)/(R_MAX - R_MIN)).ravel(),
+                              ((LL - L0_MIN)/(L0_MAX - L0_MIN)).ravel()])
+        Xtr = torch.tensor(np.column_stack([Rn, L0n]), dtype=torch.float64)
+        ytr = torch.tensor(bo, dtype=torch.float64).reshape(-1, 1)
+        lik = GaussianLikelihood()
+        model = SingleTaskGP(Xtr, ytr, likelihood=lik)
+        model.load_state_dict(torch.load(ipath / 'model.pth'), strict=False)
+        model.eval()
+        with torch.no_grad():
+            pred = lik(model(torch.tensor(Xt, dtype=torch.float64)))
+            mean = pred.mean.numpy().reshape(RR.shape)
+            lo, up = pred.confidence_region()
+            unc = (up.numpy() - lo.numpy()).reshape(RR.shape)
+    except Exception as e:
+        st.error(f"Could not load iteration {sel}: {e}")
+        return
 
-    3. **Subject walks** for {config['Cost']['time']} seconds
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Iteration", sel)
+    m2.metric("Trials so far", len(Rp))
+    m3.metric("|Best SI|", f"{np.abs(actual).min():.2f}%"
+              if len(actual) else "—")
 
-    4. Click **Stop** in LabRecorder
+    from plotly.subplots import make_subplots as _msp
+    fig = _msp(rows=1, cols=2,
+               subplot_titles=("GP mean (BO score)", "GP uncertainty"),
+               specs=[[{'type': 'surface'}, {'type': 'surface'}]],
+               horizontal_spacing=0.05)
+    fig.add_trace(go.Surface(x=Rg, y=Lg, z=mean, colorscale='RdYlGn',
+                  colorbar=dict(x=0.43, len=0.8, thickness=12)), row=1, col=1)
+    _ns = min(len(Rp), len(L0p), len(bo))
+    fig.add_trace(go.Scatter3d(
+        x=Rp[:_ns], y=L0p[:_ns], z=bo[:_ns], mode='markers+text',
+        marker=dict(size=6, color='red', line=dict(color='black', width=1)),
+        text=[str(i+1) for i in range(_ns)],
+        textfont=dict(size=9, color='white'), name='trials'), row=1, col=1)
+    fig.add_trace(go.Surface(x=Rg, y=Lg, z=unc, colorscale='Reds',
+                  colorbar=dict(x=1.0, len=0.8, thickness=12)), row=1, col=2)
+    cam = dict(eye=dict(x=1.5, y=1.5, z=1.3))
+    fig.update_layout(height=560, showlegend=False,
+                      scene=dict(xaxis_title='R', yaxis_title='L₀',
+                                 zaxis_title='BO', camera=cam),
+                      scene2=dict(xaxis_title='R', yaxis_title='L₀',
+                                  zaxis_title='σ', camera=cam),
+                      margin=dict(l=0, r=0, t=40, b=0))
+    st.plotly_chart(fig, width="stretch")
 
-    5. Click **Analyze Trial** below
-    """)
+    with st.expander("📊 Trial data"):
+        n = min(len(Rp), len(L0p), len(bo), len(actual))
+        if n == 0:
+            st.info("No overlapping trial data to display for this iteration.")
+        else:
+            st.dataframe(pd.DataFrame({
+                'Trial': range(1, n + 1),
+                'R': Rp[:n], 'L₀': L0p[:n],
+                'BO cost': bo[:n],
+                'signed SI %': actual[:n]}), width="stretch")
 
-st.markdown("---")
 
-c1, c2, c3 = st.columns([1, 1, 1])
-with c1:
-    file_exists = check_file_exists(trial_num)
-    if file_exists:
-        st.success(f"✅ File found: run-{trial_num:03d}.xdf")
-    else:
-        st.warning(f"⏳ Waiting for: run-{trial_num:03d}.xdf")
-with c2:
-    if st.button("🔍 Check File", width="stretch"):
-        st.rerun()
-with c3:
-    if st.button("▶️ Analyze Trial", type="primary",
-                 width="stretch", disabled=not file_exists):
-        with st.spinner("Analyzing trial..."):
-            if analyze_current_trial():
-                st.success("✅ Trial analyzed!")
-                st.rerun()
-            else:
-                st.error("❌ Analysis failed!")
+# ===========================================================================
+# PAGE 4 — RESULTS
+# ===========================================================================
 
-st.markdown("---")
+def page_results():
+    render_header("Results")
+    sidebar_status()
+    section_chip("Outcomes")
+    st.header("📊 Results & History")
 
-if st.session_state.results:
-    st.subheader("📊 Current Results")
+    if not st.session_state.initialized or not st.session_state.results:
+        st.info("No results yet. Run trials in **Run Experiment**.")
+        return
+
+    config = st.session_state.config
+    signed = _signed_mode(config)
+    si_target = _si_target(config)
+    hil = st.session_state.hil
+    n_steps = config['Optimization']['n_steps']
+
     best_idx = _best_idx(np.array([r['cost'] for r in st.session_state.results]),
                          config)
     best_cost = st.session_state.results[best_idx]['cost']
-    latest_cost = st.session_state.results[-1]['cost']
-    trials_done = len(st.session_state.results)
+    latest = st.session_state.results[-1]['cost']
+    done = len(st.session_state.results)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Trials", f"{done}/{n_steps}")
+    with m2:
         if signed:
-            latest_dist = abs(latest_cost - si_target)
-            st.metric(f"Latest SI (target {si_target:+.1f}%)",
-                      f"{latest_cost:+.4f}",
-                      delta=f"|Δ| = {latest_dist:.4f}",
+            st.metric(f"Best SI (→{si_target:+.0f}%)", f"{best_cost:+.2f}%",
+                      delta=f"|Δ| {abs(best_cost-si_target):.2f}",
                       delta_color="off")
         else:
-            st.metric("Latest Cost", f"{latest_cost:.4f}")
-    with c2:
-        if signed:
-            best_dist = abs(best_cost - si_target)
-            st.metric(f"Best SI (closest to {si_target:+.1f}%)",
-                      f"{best_cost:+.4f}",
-                      delta=f"|Δ| = {best_dist:.4f}",
-                      delta_color="off")
+            st.metric("Best cost", f"{best_cost:.3f}")
+    with m3:
+        st.metric("Latest SI" if signed else "Latest", f"{latest:+.2f}%"
+                  if signed else f"{latest:.3f}")
+    with m4:
+        if st.session_state.baseline_si is not None:
+            st.metric("Baseline", f"{st.session_state.baseline_si:+.2f}%")
         else:
-            st.metric("Best Cost", f"{best_cost:.4f}",
-                      delta=f"{latest_cost - best_cost:.4f}",
-                      delta_color="inverse")
-    with c3:
-        st.metric("Trials Completed", f"{trials_done}/{n_steps}")
-
-    if signed:
-        bstr = (f", baseline {st.session_state.baseline_si:+.1f}%"
-                if st.session_state.baseline_si is not None else "")
-        st.caption(
-            f"Signed symmetry, target = {si_target:+.1f}%{bstr}. BO drives "
-            f"SI toward the target (positive = left leg slower, negative = "
-            f"right leg slower)."
-        )
-
-    last_trial_num = st.session_state.results[-1]['trial']
-    last_fn = trial_filename(config['Subject']['id'],
-                             config['Subject']['session'], last_trial_num)
-    last_fp = os.path.join(
-        st.session_state.cost_extractor.trial_data_dir, last_fn)
-    trim_s = config['Cost'].get('trim_seconds', 3.0)
-    cfg = st.session_state.cost_extractor.detection_cfg
-    hs_result = plot_heelstrikes_last_trial(last_fp, cfg, trim_seconds=trim_s)
-    if hs_result is not None:
-        hs_fig, hs_warnings = hs_result
-        with st.expander(f"🦶 Heel Strike QC — Trial {last_trial_num}",
-                         expanded=True):
-            if hs_warnings:
-                for w in hs_warnings:
-                    if "🚨" in w:
-                        st.error(w)
-                    else:
-                        st.warning(w)
-            else:
-                st.success("✅ All QC checks passed — detection looks clean.")
-            if hs_fig is not None:
-                st.plotly_chart(hs_fig, width="stretch")
-                st.caption(
-                    f"Detection: jerk z-score → cluster-keep-last → stance "
-                    f"confirmation → {trim_s:.1f}s trim (gray shade). Same "
-                    f"pipeline as the BO cost.")
+            st.metric("Baseline", "n/a")
 
     if (fig := plot_progress()):
         st.plotly_chart(fig, width="stretch")
 
-    if len(st.session_state.results) > n_exploration:
-        st.subheader("🧠 GP Predicted Cost Surface")
-        if (gp_fig := plot_gp_surface()):
-            st.plotly_chart(gp_fig, width="stretch")
+    if len(st.session_state.results) > config['Optimization']['n_exploration']:
+        section_chip("GP surface")
+        if (gp := plot_gp_surface()):
+            st.plotly_chart(gp, width="stretch")
 
-    st.subheader("📋 Trial History")
+    section_chip("Trial history")
     df = pd.DataFrame(st.session_state.results)
-    df_display = df.copy()
-    df_display['R'] = df_display['R'].map('{:.4f}'.format)
-    df_display['L0'] = df_display['L0'].map('{:.4f}'.format)
-    df_display['cost'] = df_display['cost'].map(
+    disp = df.copy()
+    disp['R'] = disp['R'].map('{:.4f}'.format)
+    disp['L0'] = disp['L0'].map('{:.4f}'.format)
+    disp['cost'] = disp['cost'].map(
         '{:+.4f}'.format if signed else '{:.4f}'.format)
-    if 'dist_from_target' in df_display.columns:
-        df_display['|Δ target|'] = df_display['dist_from_target'].map(
-            '{:.4f}'.format)
-    df_display['best'] = df_display['is_best'].map(lambda x: '⭐' if x else '')
+    if 'dist_from_target' in disp.columns:
+        disp['|Δ target|'] = disp['dist_from_target'].map('{:.4f}'.format)
+    disp['best'] = disp['is_best'].map(lambda x: '⭐' if x else '')
     cols = ['trial', 'R', 'L0', 'cost']
-    if '|Δ target|' in df_display.columns and signed:
+    if '|Δ target|' in disp.columns and signed:
         cols.append('|Δ target|')
     cols += ['phase', 'best']
-    df_display = df_display[cols]
-    st.dataframe(df_display, width="stretch", height=300)
+    st.dataframe(disp[cols], width="stretch", height=360)
 
-st.markdown("---")
-_para_caption = (f"signed → target {si_target:+.1f}%" if signed else "unsigned")
-st.caption(f"HITLO_Symmetry v2.2.0 (baseline-relative targeting) | "
-           f"Built on HIL_toolkit (Kim lab) | Paradigm: {_para_caption}")
+    csv = df.to_csv(index=False)
+    st.download_button("💾 Download results CSV", data=csv,
+                       file_name=f"{config['Subject']['id']}_results.csv",
+                       mime="text/csv", type="primary")
+
+
+# ===========================================================================
+# NAVIGATION ENTRY POINT
+# ===========================================================================
+
+st.set_page_config(page_title="HITLO Symmetry Console",
+                   page_icon="🦾", layout="wide")
+inject_theme()
+
+_pages = [
+    st.Page(page_setup, title="Setup", icon="⚙️"),
+    st.Page(page_run, title="Run Experiment", icon="🏃"),
+    st.Page(page_gp_viewer, title="GP Viewer", icon="🧠"),
+    st.Page(page_results, title="Results", icon="📊"),
+]
+nav = st.navigation(_pages, position="sidebar")
+nav.run()

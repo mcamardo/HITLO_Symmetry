@@ -7,12 +7,27 @@ the symmetry metric (hitlo.symmetry), and the Bayesian optimization loop.
 The `SymmetryCost` class is the object that HIL_Exo calls each trial to
 evaluate the current (R, L0) parameter suggestion.
 
+Version 2.1.0 (adds signed target asymmetry for Patton paradigm):
+  - SymmetryCost now takes an si_target parameter
+  - SI sign convention preserved through the analysis (per-stride is always
+    signed; aggregated value is signed iff `signed=True`)
+  - The TARGET-DISTANCE math (|SI - si_target|) is applied downstream in
+    hitlo.hil_exo._mean_normalize_y, NOT here — this module returns the
+    raw signed SI so that QC/logging can see the actual value, not a
+    distance from target.
+  - si_target = 0.0 (default) reproduces v2.0.0 behavior exactly
+
 Version 2.0.0 (refactored from symmetry_cost.py v1.8.0):
   - Detection logic moved to hitlo.detection (shared with diagnostic tool)
   - Symmetry logic moved to hitlo.symmetry
   - I/O logic moved to hitlo.io
   - This file contains only the BO-specific glue: the class wrapper,
     spring-torque penalty math, and the per-trial orchestration.
+
+Paradigm flexibility (set via Cost.si_target in config):
+  - si_target =   0.0 → BO drives SI toward 0 (Aim 2 stroke, minimize asymmetry)
+  - si_target = -10.0 → BO drives SI toward -10 (Aim 1 healthy, induce
+                        left-paretic-like asymmetry via passive band)
 """
 
 from dataclasses import dataclass, field
@@ -42,7 +57,7 @@ def compute_exo_torque(ankle_angle_deg: float, R: float, L0: float) -> float:
     Conventions: positive ankle angle = plantarflexion (PF), negative = DF.
     Positive torque = dorsiflexion assist (what we want during swing).
     """
-    k = 12000.0
+    k = 10500.0
     segment_length = 0.335
     theta = 196.0
     attachment_ratio = -0.2
@@ -108,6 +123,12 @@ def compute_spring_penalty(R: float, L0: float,
     Penalizes:
       - large torques in the plantarflexion zone (should be ≈ 0 during PF)
       - insufficient dorsiflexion assist at df_angle (we want positive torque)
+
+    NOTE: Disabled by default in current config (lambda_pf=0, mu_df=0). The
+    SI-distance term in hitlo.hil_exo drives convergence on its own under
+    the new paradigm. Re-enable these if you need to nudge HILBO toward
+    band-dominant solutions (e.g., for consistent -F* implementation across
+    Aim 2 stroke subjects).
     """
     pf_angles = np.linspace(pf_zone[0], pf_zone[1], n_points)
     pf_torques = np.array([compute_exo_torque(a, R, L0) for a in pf_angles])
@@ -125,10 +146,18 @@ def compute_spring_penalty(R: float, L0: float,
 
 @dataclass
 class TrialAnalysis:
-    """Everything computed for one trial. BO uses `total_cost`; QC uses the rest."""
+    """Everything computed for one trial. BO uses `symmetry_index` (+penalty);
+    QC uses the rest.
+
+    Note: `total_cost` is the *raw* SI + penalty (signed if signed=True).
+    The target-distance transformation |SI - si_target| is applied
+    DOWNSTREAM in hitlo.hil_exo._mean_normalize_y, not here. This keeps
+    the per-trial logging readable (you see actual SI values, not
+    distances-from-target).
+    """
     # Headline numbers
-    total_cost: float
-    symmetry_index: float
+    total_cost: float           # = symmetry_index + spring_penalty (raw, signed)
+    symmetry_index: float       # signed if signed=True, else |SI|
     spring_penalty: float
 
     # Step times
@@ -155,11 +184,16 @@ class TrialAnalysis:
 class SymmetryCost:
     """BO cost extractor for the HITLO exoskeleton optimization loop.
 
+    Reports raw signed SI per trial. The target-distance transformation
+    (|SI - si_target|) is applied downstream in hitlo.hil_exo. This module's
+    si_target field is stored only for reference (logging / introspection);
+    it does NOT modify the returned cost value.
+
     Usage
     -----
     >>> cost = SymmetryCost(trial_data_dir="/path/to/xdf/files",
     ...                     subject_id="P048", session="S001",
-    ...                     signed=True, trim_seconds=3.0)
+    ...                     signed=True, si_target=-10.0, trim_seconds=3.0)
     >>> cost.set_params(R=0.08, L0=0.25)
     >>> total_cost = cost.extract_cost_from_file(trial_num=1)
     """
@@ -176,6 +210,7 @@ class SymmetryCost:
                  df_angle: float = -10.0,
                  # symmetry behavior
                  signed: bool = False,
+                 si_target: float = 0.0,                # NEW
                  trim_seconds: float = 3.0,
                  ):
         self.cost_name = "gait_symmetry"
@@ -190,13 +225,17 @@ class SymmetryCost:
         self.pf_zone = pf_zone
         self.df_angle = df_angle
         self.signed = signed
+        self.si_target = si_target                       # NEW
         self.trim_seconds = trim_seconds
 
         self._R: Optional[float] = None
         self._L0: Optional[float] = None
 
-        print(f"✅ SymmetryCost v2.0.0 initialized")
+        print(f"✅ SymmetryCost v2.1.0 initialized")
         print(f"   Mode:              {'SIGNED' if signed else 'UNSIGNED (abs)'}")
+        if signed:
+            print(f"   SI target:         {si_target:+.1f}%  "
+                  f"(BO drives SI toward this; applied in hil_exo)")
         print(f"   Directory:         {trial_data_dir}")
         print(f"   Detection:         cluster-keep-last + stance confirm")
         print(f"   Jerk threshold:    {self.detection_cfg.strict_thresh:.2f} SD strict / "
@@ -218,10 +257,14 @@ class SymmetryCost:
                                trial_num: int,
                                filename: Optional[str] = None
                                ) -> Optional[float]:
-        """Analyze one trial and return the total cost (or np.nan on failure).
+        """Analyze one trial and return the raw (signed) total cost.
 
-        This is the method HIL_Exo calls. For richer access (heel strikes,
-        per-stride SI, etc.) use `analyze_trial()` directly.
+        Returns the raw signed SI + penalty. The downstream BO loop in
+        hitlo.hil_exo converts this to a distance-from-target via
+        |cost - si_target| before feeding the GP.
+
+        For richer access (heel strikes, per-stride SI, etc.) use
+        `analyze_trial()` directly.
         """
         analysis = self.analyze_trial(trial_num=trial_num, filename=filename)
         if analysis is None:
@@ -342,6 +385,12 @@ class SymmetryCost:
                   f"mean = {left_steps.mean():.3f}s")
             print(f"   Symmetry:          {si:+.2f}%  "
                   f"({'signed' if self.signed else 'unsigned'})")
+            if self.signed:
+                # Show distance from target so the operator can see how close
+                # HILBO is to its convergence goal at a glance.
+                dist = abs(si - self.si_target)
+                print(f"   |SI - target|:     {dist:.2f}%  "
+                      f"(target = {self.si_target:+.1f}%)")
             if self._R is not None:
                 print(f"   Spring penalty:    {penalty:.4f}  "
                       f"(R={self._R:.4f}, L0={self._L0:.4f})")
@@ -369,6 +418,10 @@ class SymmetryCost:
 
         Kept for backward compatibility with old data collection configs.
         New experiments should use two shank sensors.
+
+        Note: signed SI is unreliable here because per-foot labeling is
+        ambiguous — for the target-asymmetry paradigm (Aim 1 healthy),
+        two-sensor mode is required.
         """
         stream = load_polar_stream(xdf_path, 'polar accel')
         if stream is None:
@@ -407,6 +460,14 @@ class SymmetryCost:
                 lambda_pf=self.lambda_pf, mu_df=self.mu_df,
             )
 
+        warnings_list = ["Single-sensor mode: step alternation assumed, "
+                         "per-foot labeling unreliable"]
+        if self.signed and self.si_target != 0.0:
+            warnings_list.append(
+                "Single-sensor mode with nonzero si_target: signed SI direction "
+                "unreliable; results should be interpreted cautiously."
+            )
+
         return TrialAnalysis(
             total_cost=si + penalty,
             symmetry_index=si,
@@ -418,8 +479,7 @@ class SymmetryCost:
             right_heel_strikes=hs,
             left_result=None,
             right_result=result,
-            warnings=["Single-sensor mode: step alternation assumed, "
-                     "per-foot labeling unreliable"],
+            warnings=warnings_list,
         )
 
     # ----- HIL_Exo compatibility shim ------------------------------------

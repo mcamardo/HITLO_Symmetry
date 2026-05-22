@@ -10,6 +10,28 @@ Step time definitions (standard in gait rehab literature):
     Left step  = RIGHT heel strike → next LEFT heel strike
 
 Stride time = one step + the subsequent step (one full gait cycle).
+
+Sign convention: SI is signed by default. The symmetry index preserves
+direction information so that downstream optimization can either:
+  - Drive SI toward 0 (Aim 2 stroke, "minimize asymmetry"), or
+  - Drive SI toward a nonzero target (Aim 1 healthy, "induce target
+    asymmetry" via passive band perturbation, following the Patton 2004
+    paradigm)
+
+The target value (si_target) is NOT used in this module. This module
+returns raw signed SI. The target-distance transformation |SI - si_target|
+is applied downstream in hitlo.hil_exo._mean_normalize_y when building
+GP inputs. This separation keeps logging readable (you see actual SI
+values in logs, not abstract distances from target).
+
+Sign meaning:
+    SI > 0  → right step time > left step time  (left leg support-dominant)
+    SI < 0  → left step time > right step time  (right leg support-dominant)
+
+For a left-side LegExoNET device imitating left-paretic stroke gait, the
+expected perturbation direction is SI < 0 (longer left step time, mirroring
+the characteristic short-paretic-step pattern). HILBO targeting in
+hitlo.cost / hitlo.hil_exo is signed accordingly (si_target = -10.0).
 """
 
 from typing import Tuple, List
@@ -27,8 +49,14 @@ def trim_peaks(peak_times: np.ndarray,
     """Drop heel strikes within `trim_s` seconds of the trial start or end.
 
     Ramp-up and ramp-down strides have systematically different mechanics
-    (weaker shank accelerations during startup) and contaminate the
-    steady-state symmetry estimate. Standard practice is to trim 3-5 seconds.
+    (weaker shank accelerations during startup, transient adaptation when
+    a perturbation is first applied) and contaminate the steady-state
+    symmetry estimate. Standard practice is to trim 3-5 seconds.
+
+    For the perturbation paradigm (Aim 1 healthy with passive band), the
+    first ~10-15 strides also reflect feedback-driven correction rather
+    than the adapted steady state, but those are handled at the protocol
+    level (longer trial duration) rather than via additional trimming here.
     """
     if trim_s <= 0:
         return peak_times
@@ -57,8 +85,8 @@ def compute_step_times(left_times: np.ndarray,
 
     Returns
     -------
-    right_step_times : ndarray  gaps L→R
-    left_step_times  : ndarray  gaps R→L
+    right_step_times : ndarray  gaps L→R (time from left HS to next right HS)
+    left_step_times  : ndarray  gaps R→L (time from right HS to next left HS)
     """
     all_times = np.concatenate([left_times, right_times])
     all_labels = np.array(['L'] * len(left_times) + ['R'] * len(right_times))
@@ -93,20 +121,39 @@ def compute_symmetry_index(right_step_times: np.ndarray,
 
     Dimensionless, bounded roughly in ±100%. Values:
         SI =  0  → perfectly symmetric
-        SI > 0  → right step > left step  (left leg is support-dominant)
-        SI < 0  → left step > right step  (right leg is support-dominant)
+        SI > 0  → right step time > left step time  (left leg support-dominant)
+        SI < 0  → left step time > right step time  (right leg support-dominant)
+
+    Per-stride values are ALWAYS signed (sign information preserved for
+    downstream paradigm flexibility). The `signed` flag only controls the
+    aggregated return value:
+
+        signed=True  → mean(signed SI per stride)
+                       Preserves direction. Use when HILBO is targeting
+                       a specific signed asymmetry (e.g., si_target = -10).
+
+        signed=False → mean(|signed SI per stride|)
+                       Magnitude only. Use when HILBO is minimizing
+                       asymmetry magnitude regardless of direction (legacy
+                       behavior; equivalent to si_target = 0 in current
+                       hitlo.hil_exo, though using signed=True with
+                       si_target=0 is preferred for the unified paradigm).
+
+    For the Patton-paradigm Aim 1 (induce target asymmetry via passive band)
+    and Aim 2 (drive stroke gait toward symmetry), use signed=True with the
+    appropriate si_target in the BO cost calculation downstream
+    (hitlo.hil_exo._mean_normalize_y).
 
     Parameters
     ----------
     right_step_times, left_step_times : ndarray (seconds)
     signed : bool
-        If True, return the mean signed SI (preserves sign of asymmetry).
-        If False, return mean |SI| (magnitude only).
+        See above. Default True.
 
     Returns
     -------
-    mean_si    : float                       aggregated SI across strides
-    per_stride : ndarray                     SI per stride (always signed)
+    mean_si    : float       aggregated SI across strides (signed or |·|)
+    per_stride : ndarray     SI per stride (ALWAYS signed, regardless of flag)
     """
     n = min(len(right_step_times), len(left_step_times))
     r = right_step_times[:n]
@@ -136,6 +183,11 @@ def filter_implausible_strides(heel_strike_times: np.ndarray,
     duplicate or artifact. For too-long intervals we currently leave the data
     alone (we don't fabricate missing events) but return a count so the caller
     can warn.
+
+    Note: for stroke participants, slower self-selected walking speeds may
+    occasionally produce stride times approaching max_stride_s (e.g., 2.0-2.5s
+    for severe paretic gait). The 3.0s default is generous but may need
+    loosening for very slow walkers — empirical adjustment from pilot data.
 
     Returns
     -------

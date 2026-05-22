@@ -1,6 +1,14 @@
 """
 hitlo.hil_exo — experiment driver with exoskeleton safety constraints.
 
+Version 2.4.0 — Configurable SI target (Patton paradigm support)
+                BO now minimizes |SI - si_target|, not just |SI|.
+                  - si_target =   0.0 → drives toward symmetry (Aim 2 stroke)
+                  - si_target = -10.0 → drives toward induced asymmetry
+                                        (Aim 1 healthy, left-paretic imitation)
+                  - default 0.0 reproduces v2.3.0 behavior exactly
+                "Best so far" now tracked as distance from target, not |cost|.
+
 Version 2.3.0 — Top-K acquisition fallback for unsafe BO suggestions
                 (replaces uniform random fallback)
 Version 2.2.0 — LHS exploration sampling for better parameter space coverage
@@ -14,6 +22,19 @@ It adds exoskeleton-specific safety enforcement that HIL_toolkit doesn't know
 about: torque caps, PF zone limits, DF engagement floors. These exist because
 our device is a physical spring mechanism that must not be pushed to parameter
 combinations that would injure the participant or fail to engage the ankle.
+
+PARADIGM (set via Cost.si_target in config)
+-------------------------------------------
+The BO sees `|SI - si_target|` as the value to minimize. Per-trial logging
+still shows raw signed SI (in hitlo.cost) so the operator can see the actual
+gait response, not an abstract distance. The target-distance transformation
+is applied here in _mean_normalize_y and in the non-normalized BO.run path.
+
+  - Aim 1 healthy:  si_target = -10.0  (induce left-paretic-like asymmetry)
+  - Aim 2 stroke:   si_target =   0.0  (drive paretic gait toward symmetry)
+
+Sign convention: SI > 0 means right step time > left step time. With a
+left-side LegExoNET device, expected perturbation direction is SI < 0.
 
 SAFETY
 ------
@@ -63,11 +84,14 @@ class HIL_Exo:
       - Exoskeleton-specific safety constraints (torque caps, DF engagement)
       - Latin Hypercube exploration sampling with oversampling pool
       - Graduated DF ramp-up during exploration
-      - Signed-symmetry BO that minimizes |cost| toward zero
+      - Signed-symmetry BO that minimizes |cost - si_target| toward zero,
+        supporting both "drive toward symmetry" (si_target=0) and "induce
+        target asymmetry" (si_target!=0) paradigms.
 
     Args:
         args: Full experiment config dict (parsed from exo_symmetry_config.yml).
               Expects top-level keys 'Optimization' and 'Cost'.
+              Reads `Cost.signed` (bool) and `Cost.si_target` (float, default 0.0).
         cost_extractor: An object with .cost_name and
                         .extract_cost_from_file(trial_num) methods.
                         Typically a hitlo.cost.SymmetryCost instance.
@@ -82,10 +106,19 @@ class HIL_Exo:
         self.x_opt = np.array([])
         self.y_opt = np.array([])
         self.signed = args.get("Cost", {}).get("signed", False)
+        self.si_target = float(args.get("Cost", {}).get("si_target", 0.0))   # NEW
         self._start_optimization(self.args["Optimization"])
+
+        # Format the direction string once, since we print it in multiple places.
+        if self.signed:
+            self._bo_direction_str = f"|SI - {self.si_target:+.1f}|"
+        else:
+            self._bo_direction_str = "cost"
+
         print(f"✅ HIL_Exo initialized")
         print(f"   Exploration sampling: Latin Hypercube Sampling (LHS)")
-        print(f"   BO direction: MINIMIZING {'|cost|' if self.signed else 'cost'} (signed={self.signed})")
+        print(f"   BO direction: MINIMIZING {self._bo_direction_str} "
+              f"(signed={self.signed}, si_target={self.si_target:+.1f})")
         print(f"   Hard torque cap: {HARD_TORQUE_CAP} Nm")
 
     # =======================================================================
@@ -109,13 +142,17 @@ class HIL_Exo:
     def _mean_normalize_y(self, y: np.ndarray) -> np.ndarray:
         """Normalize y for GP input.
 
-        If signed mode: take abs(y) first so BO minimizes |symmetry| toward zero,
-        not toward maximally negative (right leg as slow as possible).
-        Negate so BoTorch maximization = cost minimization.
+        If signed mode: compute |y - si_target| so BO minimizes the distance
+        from the configured target asymmetry. With si_target=0 this reduces
+        to |y| (legacy v2.3.0 behavior, drives SI toward 0 for Aim 2 stroke).
+        With si_target=-10 (Aim 1 healthy), BO drives SI toward -10%.
+
+        Mean-center and std-scale the result for GP numerical stability,
+        then negate so BoTorch maximization = cost minimization.
         """
         y = np.array(y)
         if self.signed:
-            y = np.abs(y)
+            y = np.abs(y - self.si_target)   # CHANGED: was np.abs(y)
         y = (y - np.mean(y)) / (np.std(y) + 1e-8)
         return -y
 
@@ -489,6 +526,23 @@ class HIL_Exo:
 
 
     # =======================================================================
+    # Best-so-far tracking helper
+    # =======================================================================
+
+    def _best_so_far_idx(self) -> int:
+        """Return index of best trial in self.y_opt under the configured paradigm.
+
+        In signed mode: minimize |y - si_target| (distance from target asymmetry).
+        In unsigned mode: minimize y directly.
+
+        This is the single source of truth for "best so far" rankings across
+        the terminal driver, logs, and any UI code reading the result history.
+        """
+        if self.signed:
+            return int(np.argmin(np.abs(self.y_opt - self.si_target)))
+        return int(np.argmin(self.y_opt))
+
+    # =======================================================================
     # Terminal mode (headless, prompts operator between trials)
     # =======================================================================
 
@@ -527,8 +581,8 @@ class HIL_Exo:
             print(f"Total Trials: {self.args['Optimization']['n_steps']}")
             print(f"Exploration Trials: {self.args['Optimization']['n_exploration']}")
             print(f"Exploration Sampling: Latin Hypercube Sampling (LHS)")
-            print(f"BO Direction: MINIMIZING {'|cost|' if self.signed else 'cost'} "
-                  f"(signed={self.signed})")
+            print(f"BO Direction: MINIMIZING {self._bo_direction_str} "
+                  f"(signed={self.signed}, si_target={self.si_target:+.1f})")
             print(f"Hard Torque Cap: {HARD_TORQUE_CAP} Nm")
             print(f"{'='*70}\n")
             self._generate_initial_parameters()
@@ -568,14 +622,21 @@ class HIL_Exo:
                 self.y_opt = np.concatenate(
                     (self.y_opt, np.array([cost_value])))
 
-            print(f"\n✅ Recorded: Cost = {cost_value:.4f} "
-                  f"for params {self.x_opt[-1]}")
+            # Log how close this trial got us to the target.
+            if self.signed:
+                dist = abs(cost_value - self.si_target)
+                print(f"\n✅ Recorded: Cost (raw SI) = {cost_value:+.4f}  "
+                      f"|  |SI - target| = {dist:.4f}  "
+                      f"for params {self.x_opt[-1]}")
+            else:
+                print(f"\n✅ Recorded: Cost = {cost_value:.4f} "
+                      f"for params {self.x_opt[-1]}")
             self.n += 1
 
             if (self.n >= self.args["Optimization"]["n_exploration"]
                     and self.n < self.args["Optimization"]["n_steps"]):
                 print(f"\n🔬 Running Bayesian Optimization "
-                      f"(minimizing {'|cost|' if self.signed else 'cost'})...")
+                      f"(minimizing {self._bo_direction_str})...")
                 if self.NORMALIZATION:
                     norm_x = self._normalize_x(self.x_opt)
                     norm_y = self._mean_normalize_y(self.y_opt)
@@ -584,10 +645,14 @@ class HIL_Exo:
                         norm_y.reshape(self.n, -1))
                     new_parameter = self._denormalize_x(new_parameter)
                 else:
+                    # CHANGED: distance-from-target for signed mode
+                    if self.signed:
+                        y_for_bo = -np.abs(self.y_opt - self.si_target)
+                    else:
+                        y_for_bo = -self.y_opt
                     new_parameter = self.BO.run(
                         self.x_opt.reshape(self.n, -1),
-                        (-np.abs(self.y_opt) if self.signed
-                         else -self.y_opt).reshape(self.n, -1),
+                        y_for_bo.reshape(self.n, -1),
                     )
                 new_parameter = self._get_safe_bo_suggestion(new_parameter)
                 print(f"   Next suggested parameters: {new_parameter.flatten()}")
@@ -597,10 +662,16 @@ class HIL_Exo:
                         1, self.args["Optimization"]["n_parms"])
                 ), axis=0)
 
-            best_idx = (np.argmin(np.abs(self.y_opt)) if self.signed
-                        else np.argmin(self.y_opt))
-            print(f"\n📊 Best so far: Cost={self.y_opt[best_idx]:.4f} | "
-                  f"Params={self.x_opt[best_idx]}")
+            # CHANGED: best-so-far uses configured target
+            best_idx = self._best_so_far_idx()
+            if self.signed:
+                best_dist = abs(self.y_opt[best_idx] - self.si_target)
+                print(f"\n📊 Best so far: SI={self.y_opt[best_idx]:+.4f}  "
+                      f"|  |SI - target| = {best_dist:.4f}  "
+                      f"|  Params={self.x_opt[best_idx]}")
+            else:
+                print(f"\n📊 Best so far: Cost={self.y_opt[best_idx]:.4f} | "
+                      f"Params={self.x_opt[best_idx]}")
 
             if self.n < self.args["Optimization"]["n_steps"]:
                 input("\nPress ENTER to continue to next trial...")
@@ -608,10 +679,15 @@ class HIL_Exo:
         print("\n" + "🎉" * 35)
         print("   OPTIMIZATION COMPLETE!")
         print("🎉" * 35)
-        best_idx = (np.argmin(np.abs(self.y_opt)) if self.signed
-                    else np.argmin(self.y_opt))
+        best_idx = self._best_so_far_idx()
         print(f"\nBest result:")
-        print(f"  Cost: {self.y_opt[best_idx]:.4f}")
+        if self.signed:
+            best_dist = abs(self.y_opt[best_idx] - self.si_target)
+            print(f"  SI:                {self.y_opt[best_idx]:+.4f}")
+            print(f"  |SI - target|:     {best_dist:.4f}  "
+                  f"(target = {self.si_target:+.1f})")
+        else:
+            print(f"  Cost: {self.y_opt[best_idx]:.4f}")
         print(f"  Parameters: {self.x_opt[best_idx]}")
         print(f"\nAll parameters saved to: "
               f"{self.args['Optimization']['model_save_path']}")
