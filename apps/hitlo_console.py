@@ -1,12 +1,14 @@
 """
 apps/hitlo_console.py — HITLO_Symmetry multi-page console.
 
+UPDATED for (L0, attach) parameterization with R fixed at 0.28 m.
+
 This is the clinician-facing tool. It:
   - Shows live Polar H10 streams so you can confirm sensors before each trial
   - Runs a BASELINE phase first (no-band "Pre" trials) to measure the
     subject's natural asymmetry, then computes the optimization target
     relative to that baseline
-  - Displays the (R, L0) parameters the BO wants you to set this trial
+  - Displays the (L0, attach) parameters the BO wants you to set this trial
   - Shows the predicted torque curve for those parameters
   - After each trial, analyzes the XDF and shows a QC plot of heel strikes
   - Tracks progress, cost, and the GP cost surface across trials
@@ -43,7 +45,7 @@ All detection logic lives in hitlo/ — this script is just the orchestration
 and visualization layer.
 
 Run with:
-    streamlit run apps/run_experiment.py
+    streamlit run apps/hitlo_console.py
 """
 
 import json
@@ -80,6 +82,9 @@ BASELINE_TASK = "Pre"
 # Pre run-002 is THE baseline trial whose SI defines the target.
 BASELINE_IGNORE_RUN = 1
 BASELINE_TRIAL_RUN = 2
+
+# Fixed anchor distance (no longer optimized)
+R_FIXED = 0.28
 
 
 # ===========================================================================
@@ -389,7 +394,7 @@ def analyze_baseline(run_num: int) -> Optional[float]:
     fp = os.path.join(st.session_state.cost_extractor.trial_data_dir, fname)
     if not os.path.exists(fp):
         return None
-    st.session_state.cost_extractor.set_params(R=0.0, L0=999.0)
+    st.session_state.cost_extractor.set_params(L0=0.0, attach=0.0)
     analysis = st.session_state.cost_extractor.analyze_trial(
         trial_num=run_num, filename=fname, verbose=False)
     if analysis is None:
@@ -469,7 +474,8 @@ def analyze_current_trial() -> bool:
     hil = st.session_state.hil
     params = hil.x[hil.n]
 
-    st.session_state.cost_extractor.set_params(R=params[0], L0=params[1])
+    # NEW: params are (L0, attach), not (R, L0)
+    st.session_state.cost_extractor.set_params(L0=params[0], attach=params[1])
     cost = st.session_state.cost_extractor.extract_cost_from_file(
         trial_num=trial_num, filename=fname)
 
@@ -496,9 +502,10 @@ def analyze_current_trial() -> bool:
     for i, r in enumerate(st.session_state.results):
         r['is_best'] = (i == best_idx)
 
+    # NEW: Store L0 and attach instead of R and L0
     st.session_state.results.append({
         'trial': trial_num,
-        'R': params[0], 'L0': params[1],
+        'L0': params[0], 'attach': params[1],
         'cost': cost,
         'dist_from_target': _distance_from_target(cost, config),
         'phase': phase,
@@ -555,8 +562,9 @@ def analyze_current_trial() -> bool:
 # Plots
 # ===========================================================================
 
-def plot_torque_curve(R: float, L0: float) -> go.Figure:
-    angles, torques = compute_torque_curve(R, L0, angle_min=-30.0, angle_max=30.0)
+def plot_torque_curve(L0: float, attach: float) -> go.Figure:
+    """Plot torque curve for (L0, attach) with R fixed at 0.28m."""
+    angles, torques = compute_torque_curve(L0, attach_ratio=attach, angle_min=-30.0, angle_max=30.0)
     opt = st.session_state.config['Optimization']
     pf_zone = opt.get('pf_zone_deg', [2.0, 20.0])
     df_check_angle = opt.get('df_check_angle_deg', -10.0)
@@ -580,7 +588,7 @@ def plot_torque_curve(R: float, L0: float) -> go.Figure:
     fig.add_vline(x=0, line_dash="dot", line_color="black", line_width=1,
                   annotation_text="Neutral", annotation_position="bottom right")
     fig.update_layout(
-        title=f"Torque-Angle Curve  |  R = {R:.4f} m,  L₀ = {L0:.4f} m",
+        title=f"Torque-Angle Curve  |  R = {R_FIXED:.2f} m (fixed)  L₀ = {L0:.4f} m  attach = {attach:+.2f}",
         xaxis_title="Ankle Angle (deg)  [DF ← 0 → PF]",
         yaxis_title="Exo Torque (Nm)",
         height=380, margin=dict(l=50, r=50, t=60, b=50),
@@ -591,6 +599,7 @@ def plot_torque_curve(R: float, L0: float) -> go.Figure:
 
 
 def plot_gp_surface():
+    """Plot GP surface for (L0, attach) space."""
     import torch
     hil = st.session_state.hil
     if hil.n < st.session_state.config['Optimization']['n_exploration'] + 1:
@@ -600,13 +609,13 @@ def plot_gp_surface():
 
     config = st.session_state.config
     range_ = np.array(list(config['Optimization']['range'])).reshape(2, 2)
-    R_min, L0_min = range_[0]
-    R_max, L0_max = range_[1]
+    L0_min, attach_min = range_[0]
+    L0_max, attach_max = range_[1]
     n_grid = 40
-    R_grid = np.linspace(R_min, R_max, n_grid)
     L0_grid = np.linspace(L0_min, L0_max, n_grid)
-    RR, LL = np.meshgrid(R_grid, L0_grid)
-    grid_pts = np.column_stack([RR.ravel(), LL.ravel()])
+    attach_grid = np.linspace(attach_min, attach_max, n_grid)
+    LL, AA = np.meshgrid(L0_grid, attach_grid)
+    grid_pts = np.column_stack([LL.ravel(), AA.ravel()])
 
     if config['Optimization']['normalize']:
         grid_norm = (grid_pts - range_[0]) / (range_[1] - range_[0])
@@ -644,7 +653,7 @@ def plot_gp_surface():
 
     # --- Panel 1: mean surface ---
     fig.add_trace(go.Surface(
-        x=R_grid, y=L0_grid, z=mean_display,
+        x=L0_grid, y=attach_grid, z=mean_display,
         colorscale='RdYlGn_r', opacity=0.92,
         colorbar=dict(title='Pred. Cost', x=0.44, len=0.8, thickness=12),
         showscale=True), row=1, col=1)
@@ -673,7 +682,7 @@ def plot_gp_surface():
 
     # --- Panel 2: uncertainty surface ---
     fig.add_trace(go.Surface(
-        x=R_grid, y=L0_grid, z=std_display,
+        x=L0_grid, y=attach_grid, z=std_display,
         colorscale='Oranges',
         colorbar=dict(title='σ', x=1.0, len=0.8, thickness=12),
         showscale=True), row=1, col=2)
@@ -690,13 +699,13 @@ def plot_gp_surface():
         para_str = "minimize |cost|"
     cam = dict(eye=dict(x=1.5, y=-1.5, z=1.2))
     fig.update_layout(
-        title=(f'GP Cost Surface  |  R [{R_min}–{R_max}]  '
-               f'L₀ [{L0_min}–{L0_max}]  |  {para_str}'),
+        title=(f'GP Cost Surface  |  L₀ [{L0_min}–{L0_max}]  '
+               f'attach [{attach_min:+.1f}–{attach_max:+.1f}]  |  {para_str}  |  R = {R_FIXED} m (fixed)'),
         height=620, margin=dict(l=0, r=0, t=70, b=0), showlegend=True,
         legend=dict(orientation='h', yanchor='bottom', y=-0.05),
-        scene=dict(xaxis_title='R (m)', yaxis_title='L₀ (m)',
+        scene=dict(xaxis_title='L₀ (m)', yaxis_title='attach',
                    zaxis_title='Pred. Cost', camera=cam),
-        scene2=dict(xaxis_title='R (m)', yaxis_title='L₀ (m)',
+        scene2=dict(xaxis_title='L₀ (m)', yaxis_title='attach',
                     zaxis_title='σ', camera=cam),
     )
     return fig
@@ -746,11 +755,11 @@ def plot_progress():
                       annotation_text=f"Best: {df['cost'].min():.2f}",
                       row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=df['trial'], y=df['R'], mode='lines+markers',
-                             name='R', marker=dict(size=8),
-                             line=dict(width=2)), row=2, col=1)
     fig.add_trace(go.Scatter(x=df['trial'], y=df['L0'], mode='lines+markers',
                              name='L₀', marker=dict(size=8),
+                             line=dict(width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['trial'], y=df['attach'], mode='lines+markers',
+                             name='attach', marker=dict(size=8),
                              line=dict(width=2)), row=2, col=1)
     fig.update_xaxes(title_text="Trial", row=2, col=1)
     fig.update_yaxes(title_text="SI (%)" if signed else "Cost", row=1, col=1)
@@ -1131,9 +1140,6 @@ def inject_theme():
       div[data-testid="stDataFrame"] {{ border-radius: 12px; overflow: hidden; }}
 
       /* ---- Recolor Streamlit's blue accents to orange/white ---- */
-      /* info / notice boxes (st.info) -> orange tint.
-         st.error stays red, st.warning amber, st.success green — so safety
-         alerts still stand out. We target the info variant specifically. */
       div[data-testid="stAlert"][kind="info"],
       div[data-baseweb="notification"][kind="info"] {{
           background: rgba(232,119,46,0.10) !important;
@@ -1143,30 +1149,21 @@ def inject_theme():
       div[data-testid="stAlert"][kind="info"] strong {{
           color: {ACCENT} !important;
       }}
-      /* If kind attribute isn't present, fall back: any alert that is the
-         default blue gets the orange tint. Errors/warnings override via
-         their own stronger Streamlit classes. */
       .stAlert {{ border-radius: 12px !important; }}
-      /* links */
       a, a:visited {{ color: {ACCENT} !important; }}
-      /* progress bar fill */
       div[data-testid="stProgress"] div[role="progressbar"] > div {{
           background: {ACCENT} !important;
       }}
-      /* slider handle */
       div[data-testid="stSlider"] div[role="slider"] {{
           background: {ACCENT} !important;
       }}
-      /* nav active item */
       [data-testid="stSidebarNav"] a[aria-current="page"] {{
           color: {ACCENT} !important;
       }}
-      /* number-input +/- buttons hover */
       button[data-testid="stNumberInputStepUp"]:hover,
       button[data-testid="stNumberInputStepDown"]:hover {{
           color: {ACCENT} !important; border-color: {ACCENT} !important;
       }}
-      /* spinner */
       div[data-testid="stSpinner"] > div {{ border-top-color: {ACCENT} !important; }}
 
       /* ---- Section label chip — dark orange ---- */
@@ -1244,8 +1241,9 @@ def sidebar_status():
 
     **Baseline** {base_line}
     **Trials** {opt['n_steps']} ({opt['n_exploration']} LHS)
-    **R** {range_[0,0]:.3f}–{range_[1,0]:.3f}  
-    **L₀** {range_[0,1]:.3f}–{range_[1,1]:.3f}
+    **L₀** {range_[0,0]:.3f}–{range_[1,0]:.3f}  
+    **attach** {range_[0,1]:+.1f}–{range_[1,1]:+.1f}
+    **R (fixed)** {R_FIXED} m
     """)
 
 
@@ -1278,13 +1276,14 @@ def page_setup():
                      'signed': True, 'si_target': -10.0, 'trim_seconds': 3.0},
             'Optimization': {
                 'n_parms': 2, 'n_steps': 15, 'n_exploration': 5,
-                'range': [[0.24, 0.30], [0.35, 0.40]],
+                'range': [[0.32, -0.2], [0.44, 1.0]],
                 'device': 'cpu', 'normalize': True, 'acquisition': 'ei',
                 'kernel_function': 'se', 'model_save_path': 'auto',
-                'result_save_path': 'auto', 'pf_zone_deg': [2, 20.0],
-                'pf_torque_threshold': 4.0, 'min_df_torque_nm': 20,
-                'df_check_angle_deg': -10.0, 'df_min_bo_nm': 0,
-                'lambda_pf': 0, 'mu_df': 0},
+                'result_save_path': 'auto',
+                'max_pf_torque_nm': 90.0, 'pf_check_angle_range': [0.0, 30.0],
+                'max_df_torque_nm': 10.0, 'df_check_angle_range': [-30.0, 0.0],
+                'slack_at_neutral_max_torque': 2.0, 'df_check_angle_deg': -10.0,
+                'lambda_pf': 0.01, 'mu_df': 0.005},
         }
     subj = _cfg.setdefault('Subject', {})
     cost = _cfg.setdefault('Cost', {})
@@ -1369,48 +1368,51 @@ def page_setup():
             opt['normalize'] = st.checkbox(
                 "Normalize", value=bool(opt.get('normalize', True)))
 
-        st.markdown("**Parameter ranges**")
-        rng = np.array(opt.get('range', [[0.24, 0.30], [0.35, 0.40]]),
+        st.markdown("**Parameter ranges (L₀, attach)** — R is FIXED at 0.28 m")
+        rng = np.array(opt.get('range', [[0.32, -0.2], [0.44, 1.0]]),
                        dtype=float)
         rc1, rc2, rc3, rc4 = st.columns(4)
         with rc1:
-            r_min = st.number_input("R min (m)", value=float(rng[0, 0]),
-                                    step=0.01, format="%.4f")
+            l0_min = st.number_input("L₀ min (m)", value=float(rng[0, 0]),
+                                     step=0.01, format="%.4f")
         with rc2:
-            r_max = st.number_input("R max (m)", value=float(rng[1, 0]),
-                                    step=0.01, format="%.4f")
+            l0_max = st.number_input("L₀ max (m)", value=float(rng[1, 0]),
+                                     step=0.01, format="%.4f")
         with rc3:
-            l_min = st.number_input("L₀ min (m)", value=float(rng[0, 1]),
-                                    step=0.01, format="%.4f")
+            attach_min = st.number_input("attach min", value=float(rng[0, 1]),
+                                         step=0.1, format="%+.2f")
         with rc4:
-            l_max = st.number_input("L₀ max (m)", value=float(rng[1, 1]),
-                                    step=0.01, format="%.4f")
-        opt['range'] = [[r_min, l_min], [r_max, l_max]]
+            attach_max = st.number_input("attach max", value=float(rng[1, 1]),
+                                         step=0.1, format="%+.2f")
+        opt['range'] = [[l0_min, attach_min], [l0_max, attach_max]]
 
-        with st.expander("⚙️ Advanced safety / torque settings"):
+        with st.expander("⚙️ Advanced torque constraints"):
+            st.markdown("**Hard limits enforced every trial:**")
             sc1, sc2, sc3 = st.columns(3)
             with sc1:
-                opt['pf_torque_threshold'] = st.number_input(
-                    "PF zone cap (Nm)",
-                    value=float(opt.get('pf_torque_threshold', 4.0)), step=0.5)
-                opt['df_min_bo_nm'] = st.number_input(
-                    "DF min during BO (Nm)",
-                    value=float(opt.get('df_min_bo_nm', 0)), step=1.0,
-                    help="0 lets BO pick zero-torque configs.")
+                opt['max_pf_torque_nm'] = st.number_input(
+                    "Max PF torque (Nm)",
+                    value=float(opt.get('max_pf_torque_nm', 90.0)), step=5.0)
+                opt['pf_check_angle_range'] = [
+                    st.number_input("PF zone min (deg)", value=0.0, step=1.0),
+                    st.number_input("PF zone max (deg)", value=30.0, step=1.0)
+                ]
             with sc2:
-                opt['min_df_torque_nm'] = st.number_input(
-                    "DF ramp max (Nm)",
-                    value=float(opt.get('min_df_torque_nm', 20)), step=1.0)
+                opt['max_df_torque_nm'] = st.number_input(
+                    "Max DF torque (Nm)",
+                    value=float(opt.get('max_df_torque_nm', 10.0)), step=1.0)
+                opt['df_check_angle_range'] = [
+                    st.number_input("DF zone min (deg)", value=-30.0, step=1.0),
+                    st.number_input("DF zone max (deg)", value=0.0, step=1.0)
+                ]
+            with sc3:
+                opt['slack_at_neutral_max_torque'] = st.number_input(
+                    "Slack at 0° max (Nm)",
+                    value=float(opt.get('slack_at_neutral_max_torque', 2.0)),
+                    step=0.5)
                 opt['df_check_angle_deg'] = st.number_input(
                     "DF check angle (deg)",
                     value=float(opt.get('df_check_angle_deg', -10.0)), step=1.0)
-            with sc3:
-                pf_zone = opt.get('pf_zone_deg', [2.0, 20.0])
-                pf_lo = st.number_input("PF zone lo (deg)",
-                                        value=float(pf_zone[0]), step=1.0)
-                pf_hi = st.number_input("PF zone hi (deg)",
-                                        value=float(pf_zone[1]), step=1.0)
-                opt['pf_zone_deg'] = [pf_lo, pf_hi]
 
     st.markdown("---")
     bc1, bc2, bc3 = st.columns([1, 1, 1])
@@ -1643,32 +1645,19 @@ def _optimization_phase(config, signed):
 
     params = hil.x[hil.n]
 
+    # NEW: Show L0 and attach (not R and L0)
     mc1, mc2 = st.columns(2)
-    mc1.metric("R (m)", f"{params[0]:.4f}")
-    mc2.metric("L₀ (m)", f"{params[1]:.4f}")
+    mc1.metric("L₀ (m)", f"{params[0]:.4f}")
+    mc2.metric("Attach", f"{params[1]:+.2f}")
 
-    st.plotly_chart(plot_torque_curve(R=params[0], L0=params[1]),
+    # NEW: R is fixed at 0.28m
+    st.plotly_chart(plot_torque_curve(L0=params[0], attach=params[1]),
                     width="stretch")
-
-    # --- QC metrics hidden per user request (kept for easy restore) ---
-    # angles_check, torques_check = compute_torque_curve(params[0], params[1])
-    # pf_zone = config['Optimization'].get('pf_zone_deg', [2.0, 20.0])
-    # pf_mask = (angles_check >= pf_zone[0]) & (angles_check <= pf_zone[1])
-    # pf_rms = np.sqrt(np.mean(torques_check[pf_mask] ** 2))
-    # dfa = config['Optimization'].get('df_check_angle_deg', -10.0)
-    # df_pk = float(np.interp(dfa, angles_check, torques_check))
-    # pen = compute_spring_penalty(
-    #     params[0], params[1],
-    #     lambda_pf=st.session_state.cost_extractor.lambda_pf,
-    #     mu_df=st.session_state.cost_extractor.mu_df)
-    # q1, q2, q3 = st.columns(3)
-    # q1.metric("PF-zone RMS (→0)", f"{pf_rms:.2f} Nm")
-    # q2.metric("Peak DF torque", f"{df_pk:.2f} Nm")
-    # q3.metric("Shape penalty", f"{pen:.4f}")
 
     with st.expander("📝 LabRecorder steps", expanded=True):
         st.markdown(f"""
-        1. Enter **R = {params[0]:.4f}**, **L₀ = {params[1]:.4f}** into Computer 2.
+        1. Enter **L₀ = {params[0]:.4f}** and **attach = {params[1]:+.2f}** into Computer 2.
+           (R is fixed at {R_FIXED} m)
         2. LabRecorder: Block/Task = `Default`, Run = `{trial_num}` →
            `sub-{config['Subject']['id']}_ses-{config['Subject']['session']}_task-Default_run-{trial_num:03d}_eeg.xdf`
         3. Walk {config['Cost']['time']} s · Stop · Analyze below.
@@ -1747,7 +1736,7 @@ def page_gp_viewer():
             st.markdown("---")
             section_chip("Trial history")
             df = pd.DataFrame(st.session_state.results)
-            st.dataframe(df[['trial', 'R', 'L0', 'cost', 'phase']],
+            st.dataframe(df[['trial', 'L0', 'attach', 'cost', 'phase']],
                          width="stretch")
         return
 
@@ -1795,9 +1784,9 @@ def _gp_historical_viewer(base_dir, subject, session):
 
     cfg = load_config()
     rng = (np.array(list(cfg['Optimization']['range'])).reshape(2, 2)
-           if cfg else np.array([[0.24, 0.30], [0.35, 0.40]]))
-    R_MIN, R_MAX = rng[0, 0], rng[1, 0]
-    L0_MIN, L0_MAX = rng[0, 1], rng[1, 1]
+           if cfg else np.array([[0.32, -0.2], [0.44, 1.0]]))
+    L0_MIN, attach_MIN = rng[0, 0], rng[0, 1]
+    L0_MAX, attach_MAX = rng[1, 0], rng[1, 1]
 
     st.success(f"✅ {len(hil_results)} trials · {len(iters)} checkpoints "
                f"(iter {min(iters)}–{max(iters)})")
@@ -1808,17 +1797,17 @@ def _gp_historical_viewer(base_dir, subject, session):
         data = np.loadtxt(ipath / 'data.csv')
         if data.ndim == 1:
             data = data.reshape(1, -1)
-        Rn, L0n, bo = data[:, 0], data[:, 1], data[:, 2]
-        Rp = Rn * (R_MAX - R_MIN) + R_MIN
+        L0n, attachn, bo = data[:, 0], data[:, 1], data[:, 2]
         L0p = L0n * (L0_MAX - L0_MIN) + L0_MIN
+        attachp = attachn * (attach_MAX - attach_MIN) + attach_MIN
         actual = hil_results['cost'].values[:sel]
 
-        Rg = np.linspace(R_MIN, R_MAX, 40)
-        Lg = np.linspace(L0_MIN, L0_MAX, 40)
-        RR, LL = np.meshgrid(Rg, Lg)
-        Xt = np.column_stack([((RR - R_MIN)/(R_MAX - R_MIN)).ravel(),
-                              ((LL - L0_MIN)/(L0_MAX - L0_MIN)).ravel()])
-        Xtr = torch.tensor(np.column_stack([Rn, L0n]), dtype=torch.float64)
+        L0g = np.linspace(L0_MIN, L0_MAX, 40)
+        attachg = np.linspace(attach_MIN, attach_MAX, 40)
+        LL, AA = np.meshgrid(L0g, attachg)
+        Xt = np.column_stack([((LL - L0_MIN)/(L0_MAX - L0_MIN)).ravel(),
+                              ((AA - attach_MIN)/(attach_MAX - attach_MIN)).ravel()])
+        Xtr = torch.tensor(np.column_stack([L0n, attachn]), dtype=torch.float64)
         ytr = torch.tensor(bo, dtype=torch.float64).reshape(-1, 1)
         lik = GaussianLikelihood()
         model = SingleTaskGP(Xtr, ytr, likelihood=lik)
@@ -1826,16 +1815,16 @@ def _gp_historical_viewer(base_dir, subject, session):
         model.eval()
         with torch.no_grad():
             pred = lik(model(torch.tensor(Xt, dtype=torch.float64)))
-            mean = pred.mean.numpy().reshape(RR.shape)
+            mean = pred.mean.numpy().reshape(LL.shape)
             lo, up = pred.confidence_region()
-            unc = (up.numpy() - lo.numpy()).reshape(RR.shape)
+            unc = (up.numpy() - lo.numpy()).reshape(LL.shape)
     except Exception as e:
         st.error(f"Could not load iteration {sel}: {e}")
         return
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Iteration", sel)
-    m2.metric("Trials so far", len(Rp))
+    m2.metric("Trials so far", len(L0p))
     m3.metric("|Best SI|", f"{np.abs(actual).min():.2f}%"
               if len(actual) else "—")
 
@@ -1844,33 +1833,33 @@ def _gp_historical_viewer(base_dir, subject, session):
                subplot_titles=("GP mean (BO score)", "GP uncertainty"),
                specs=[[{'type': 'surface'}, {'type': 'surface'}]],
                horizontal_spacing=0.05)
-    fig.add_trace(go.Surface(x=Rg, y=Lg, z=mean, colorscale='RdYlGn',
+    fig.add_trace(go.Surface(x=L0g, y=attachg, z=mean, colorscale='RdYlGn',
                   colorbar=dict(x=0.43, len=0.8, thickness=12)), row=1, col=1)
-    _ns = min(len(Rp), len(L0p), len(bo))
+    _ns = min(len(L0p), len(attachp), len(bo))
     fig.add_trace(go.Scatter3d(
-        x=Rp[:_ns], y=L0p[:_ns], z=bo[:_ns], mode='markers+text',
+        x=L0p[:_ns], y=attachp[:_ns], z=bo[:_ns], mode='markers+text',
         marker=dict(size=6, color='red', line=dict(color='black', width=1)),
         text=[str(i+1) for i in range(_ns)],
         textfont=dict(size=9, color='white'), name='trials'), row=1, col=1)
-    fig.add_trace(go.Surface(x=Rg, y=Lg, z=unc, colorscale='Reds',
+    fig.add_trace(go.Surface(x=L0g, y=attachg, z=unc, colorscale='Reds',
                   colorbar=dict(x=1.0, len=0.8, thickness=12)), row=1, col=2)
     cam = dict(eye=dict(x=1.5, y=1.5, z=1.3))
     fig.update_layout(height=560, showlegend=False,
-                      scene=dict(xaxis_title='R', yaxis_title='L₀',
+                      scene=dict(xaxis_title='L₀', yaxis_title='attach',
                                  zaxis_title='BO', camera=cam),
-                      scene2=dict(xaxis_title='R', yaxis_title='L₀',
+                      scene2=dict(xaxis_title='L₀', yaxis_title='attach',
                                   zaxis_title='σ', camera=cam),
                       margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig, width="stretch")
 
     with st.expander("📊 Trial data"):
-        n = min(len(Rp), len(L0p), len(bo), len(actual))
+        n = min(len(L0p), len(attachp), len(bo), len(actual))
         if n == 0:
             st.info("No overlapping trial data to display for this iteration.")
         else:
             st.dataframe(pd.DataFrame({
                 'Trial': range(1, n + 1),
-                'R': Rp[:n], 'L₀': L0p[:n],
+                'L₀': L0p[:n], 'attach': attachp[:n],
                 'BO cost': bo[:n],
                 'signed SI %': actual[:n]}), width="stretch")
 
@@ -1931,14 +1920,14 @@ def page_results():
     section_chip("Trial history")
     df = pd.DataFrame(st.session_state.results)
     disp = df.copy()
-    disp['R'] = disp['R'].map('{:.4f}'.format)
     disp['L0'] = disp['L0'].map('{:.4f}'.format)
+    disp['attach'] = disp['attach'].map('{:+.2f}'.format)
     disp['cost'] = disp['cost'].map(
         '{:+.4f}'.format if signed else '{:.4f}'.format)
     if 'dist_from_target' in disp.columns:
         disp['|Δ target|'] = disp['dist_from_target'].map('{:.4f}'.format)
     disp['best'] = disp['is_best'].map(lambda x: '⭐' if x else '')
-    cols = ['trial', 'R', 'L0', 'cost']
+    cols = ['trial', 'L0', 'attach', 'cost']
     if '|Δ target|' in disp.columns and signed:
         cols.append('|Δ target|')
     cols += ['phase', 'best']

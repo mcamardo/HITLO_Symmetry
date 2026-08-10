@@ -1,60 +1,24 @@
 """
 hitlo.hil_exo — experiment driver with exoskeleton safety constraints.
 
-Version 2.4.0 — Configurable SI target (Patton paradigm support)
-                BO now minimizes |SI - si_target|, not just |SI|.
-                  - si_target =   0.0 → drives toward symmetry (Aim 2 stroke)
-                  - si_target = -10.0 → drives toward induced asymmetry
-                                        (Aim 1 healthy, left-paretic imitation)
-                  - default 0.0 reproduces v2.3.0 behavior exactly
-                "Best so far" now tracked as distance from target, not |cost|.
+UPDATED for (L0, attach) parameterization with R = 0.28 m fixed.
 
-Version 2.3.0 — Top-K acquisition fallback for unsafe BO suggestions
-                (replaces uniform random fallback)
-Version 2.2.0 — LHS exploration sampling for better parameter space coverage
-                DF hard floor during BO (df_min_bo_nm), mu_df removed from cost
-                Graduated DF torque ramp during exploration, DF hard constraint
-                removed during BO (soft mu_df reward drives engagement instead)
-                Signed symmetry support: BO minimizes |cost| toward zero
-
+Version 2.5.1 — (L0, attach) parameterization with corrected torque constraints
+                BO now optimizes spring rest length (L0) and foot attachment
+                (attach_ratio) with anchor distance R fixed at 0.28 m.
+                - L0 ∈ [0.32, 0.44] m (engagement timing)
+                - attach ∈ [-0.2, +1.0] (direction + timing)
+                
+Safety constraints (HARD):
+                - Max plantarflexor torque: 90 Nm [0°, 30°]
+                - Max dorsiflexor torque: 10 Nm [-30°, 0°]
+                - Slack region at 0°: < 2 Nm (neutral engagement)
+                
 This is the HITLO_Symmetry wrapper around HIL_toolkit's BayesianOptimization.
 It adds exoskeleton-specific safety enforcement that HIL_toolkit doesn't know
-about: torque caps, PF zone limits, DF engagement floors. These exist because
-our device is a physical spring mechanism that must not be pushed to parameter
-combinations that would injure the participant or fail to engage the ankle.
-
-PARADIGM (set via Cost.si_target in config)
--------------------------------------------
-The BO sees `|SI - si_target|` as the value to minimize. Per-trial logging
-still shows raw signed SI (in hitlo.cost) so the operator can see the actual
-gait response, not an abstract distance. The target-distance transformation
-is applied here in _mean_normalize_y and in the non-normalized BO.run path.
-
-  - Aim 1 healthy:  si_target = -10.0  (induce left-paretic-like asymmetry)
-  - Aim 2 stroke:   si_target =   0.0  (drive paretic gait toward symmetry)
-
-Sign convention: SI > 0 means right step time > left step time. With a
-left-side LegExoNET device, expected perturbation direction is SI < 0.
-
-SAFETY
-------
-Exploration (trials 1–n_exploration):
-  - Hard cap: 90 Nm absolute, always
-  - PF zone hard cap: pf_torque_threshold, always
-  - DF minimum: linearly ramped from 0 Nm (trial 1) → min_df_torque_nm (trial n)
-
-BO (trials n_exploration+1 → n_steps):
-  - Hard cap: 90 Nm absolute, always
-  - PF zone hard cap: pf_torque_threshold, always
-  - DF minimum: soft — enforced via df_min_bo_nm hard floor + mu_df soft reward
-
-EXPLORATION SAMPLING
---------------------
-Latin Hypercube Sampling (LHS) ensures exploration trials are well spread
-across the full parameter space. Falls back to random sampling if LHS pool
-is exhausted by safety filtering.
-
-Requires HIL_toolkit — see README for installation.
+about: torque caps for both directions, slack region enforcement. These exist
+because our device is a physical spring mechanism that must not be pushed to
+parameter combinations that would injure the participant or fail to engage.
 """
 
 from typing import Dict, Tuple
@@ -65,7 +29,7 @@ try:
     from HIL.optimization.BO import BayesianOptimization
 except ImportError as e:
     raise ImportError(
-        "HITLO_Symmetry requires HIL_toolkit. Install it with:\n"
+        "HITLO_Symmetry requires HIL_toolkit. Install it with:\n"                                                       
         "    git clone https://github.com/UICRRL/HIL_toolkit.git\n"
         "    cd HIL_toolkit && pip install -e .\n"
         f"Original error: {e}"
@@ -74,16 +38,12 @@ except ImportError as e:
 from hitlo.cost import compute_exo_torque, compute_torque_curve
 
 
-HARD_TORQUE_CAP = 90.0   # Nm — absolute safety limit, never exceeded
-
-
 class HIL_Exo:
     """Orchestrates the HITLO experiment: LHS exploration + BO with safety checks.
 
     Wraps HIL_toolkit's BayesianOptimization for the GP engine and adds:
-      - Exoskeleton-specific safety constraints (torque caps, DF engagement)
+      - Exoskeleton-specific safety constraints (torque caps both directions)
       - Latin Hypercube exploration sampling with oversampling pool
-      - Graduated DF ramp-up during exploration
       - Signed-symmetry BO that minimizes |cost - si_target| toward zero,
         supporting both "drive toward symmetry" (si_target=0) and "induce
         target asymmetry" (si_target!=0) paradigms.
@@ -106,7 +66,7 @@ class HIL_Exo:
         self.x_opt = np.array([])
         self.y_opt = np.array([])
         self.signed = args.get("Cost", {}).get("signed", False)
-        self.si_target = float(args.get("Cost", {}).get("si_target", 0.0))   # NEW
+        self.si_target = float(args.get("Cost", {}).get("si_target", 0.0))
         self._start_optimization(self.args["Optimization"])
 
         # Format the direction string once, since we print it in multiple places.
@@ -115,11 +75,15 @@ class HIL_Exo:
         else:
             self._bo_direction_str = "cost"
 
-        print(f"✅ HIL_Exo initialized")
+        print(f"✅ HIL_Exo initialized (L0, attach parameterization)")
         print(f"   Exploration sampling: Latin Hypercube Sampling (LHS)")
         print(f"   BO direction: MINIMIZING {self._bo_direction_str} "
               f"(signed={self.signed}, si_target={self.si_target:+.1f})")
-        print(f"   Hard torque cap: {HARD_TORQUE_CAP} Nm")
+        print(f"   Torque constraints:")
+        print(f"     - Max plantarflexor [0°, 30°]: 60 Nm")
+        print(f"     - Max dorsiflexor [-30°, 0°]: -10 Nm")
+        print(f"     - Slack at 0° (neutral): < 2 Nm")
+        print(f"   Fixed R: 0.28 m (anchor distance)")
 
     # =======================================================================
     # Parameter normalization (for GP numerical stability)
@@ -137,6 +101,8 @@ class HIL_Exo:
         range_x = np.array(self.args["Optimization"]["range"]).reshape(
             2, self.args["Optimization"]['n_parms'])
         x = x * (range_x[1, :] - range_x[0, :]) + range_x[0, :]
+        # Clamp to bounds (BO can suggest outside [0,1] due to numerical precision)
+        x = np.clip(x, range_x[0, :], range_x[1, :])
         return x
 
     def _mean_normalize_y(self, y: np.ndarray) -> np.ndarray:
@@ -144,7 +110,7 @@ class HIL_Exo:
 
         If signed mode: compute |y - si_target| so BO minimizes the distance
         from the configured target asymmetry. With si_target=0 this reduces
-        to |y| (legacy v2.3.0 behavior, drives SI toward 0 for Aim 2 stroke).
+        to |y| (drives SI toward 0 for Aim 2 stroke).
         With si_target=-10 (Aim 1 healthy), BO drives SI toward -10%.
 
         Mean-center and std-scale the result for GP numerical stability,
@@ -152,13 +118,31 @@ class HIL_Exo:
         """
         y = np.array(y)
         if self.signed:
-            y = np.abs(y - self.si_target)   # CHANGED: was np.abs(y)
+            y = np.abs(y - self.si_target)
         y = (y - np.mean(y)) / (np.std(y) + 1e-8)
         return -y
 
     # =======================================================================
     # BO initialization (HIL_toolkit instance)
     # =======================================================================
+
+    def _generate_initial_parameters(self) -> None:
+        """Generate initial parameters: manual ramp only. BO generates trials 6+ on demand."""
+        opt = self.args["Optimization"]
+        n_manual = opt.get("manual_ramp_trials", 0)
+        
+        if n_manual > 0 and "ramp_sequence" in opt:
+            # Manual ramp trials only
+            ramp = np.array(opt["ramp_sequence"])
+            self.x = ramp
+            
+            print(f"✅ Generated {len(self.x)} parameters")
+            print(f"   Trials 1–{n_manual}: manual ramp (torque-based)")
+            print(f"   Trials {n_manual+1}–{opt['n_steps']}: Bayesian Optimization (on demand)")
+        else:
+            # No ramp configured
+            self.x = np.empty((0, opt["n_parms"]))
+            print(f"✅ No manual ramp. BO will generate all {opt['n_steps']} trials on demand.")
 
     def _start_optimization(self, args: Dict) -> None:
         if self.NORMALIZATION:
@@ -176,313 +160,204 @@ class HIL_Exo:
             )
 
     # =======================================================================
-    # Safety: verify a candidate (R, L0) won't produce unsafe torques
+    # Safety: verify a candidate (L0, attach) won't produce unsafe torques
     # =======================================================================
 
-    def _is_safe_candidate(self, R: float, L0: float,
-                           pf_zone: list, pf_threshold: float,
-                           df_min: float = 0.0,
-                           df_check_angle: float = -10.0
-                           ) -> Tuple[bool, float, float, float]:
-        """Check if a candidate (R, L0) is safe.
-
-        Always enforced:
-          1. Hard cap:    max torque anywhere <= HARD_TORQUE_CAP (90 Nm)
-          2. PF zone cap: max torque in pf_zone <= pf_threshold
-
-        Exploration only (df_min > 0):
-          3. DF minimum:  torque at df_check_angle >= df_min
-
+    def _is_safe_candidate(self, L0: float, attach: float,
+                           ) -> Tuple[bool, dict]:
+        """Check if a candidate (L0, attach) satisfies safety constraints.
+        
+        DIRECTIONAL constraints based on attach polarity:
+          - If attach < 0 (PF-assist): enforce max PF torque in [0°, 30°] ≤ 90 Nm
+            (DF zone naturally ~zero because spring is pulling plantarflexion)
+          - If attach > 0 (DF-assist): enforce max DF torque in [-30°, 0°] ≤ 20 Nm
+            (PF zone naturally ~zero because spring is pulling dorsiflexion)
+          - If attach ≈ 0 (neutral): very weak torque everywhere, always safe
+        
+        This allows the BO to explore diverse torque profiles:
+        - LHS samples across polarity spectrum → sees both PF and DF regions
+        - Zero regions are naturally zero (physics), not artificially constrained
+        - BO learns which regions produce low/high SI and when to use them
+        
         Returns:
-            (is_safe, max_pf_torque, df_torque, max_total_torque)
-        """
-        # 1. Hard cap
-        angles_full, torques_full = compute_torque_curve(
-            R, L0, angle_min=-30.0, angle_max=30.0, n_points=100)
-        max_total = float(np.max(np.abs(torques_full)))
-        if max_total > HARD_TORQUE_CAP:
-            return False, None, None, max_total
-
-        # 2. PF zone cap
-        _, torques_pf = compute_torque_curve(
-            R, L0, angle_min=pf_zone[0], angle_max=pf_zone[1], n_points=50)
-        max_pf = float(np.max(np.abs(torques_pf)))
-        if max_pf > pf_threshold:
-            return False, max_pf, None, max_total
-
-        # 3. DF minimum (exploration only — skipped when df_min=0)
-        df_torque = float(compute_exo_torque(df_check_angle, R, L0))
-        if df_min > 0 and df_torque < df_min:
-            return False, max_pf, df_torque, max_total
-
-        return True, max_pf, df_torque, max_total
-
-    def _get_exploration_df_min(self, trial_idx: int) -> float:
-        """Linear ramp UP of DF minimum torque across exploration trials.
-
-        trial_idx: 0-based (0 = first trial, n_exploration-1 = last).
-        Returns df_min for this trial (0 Nm at trial 0 → min_df_torque_nm at last).
+            (is_safe, details_dict)
+            where details_dict contains: max_pf, max_df, at_zero, reason (if failed)
         """
         opt = self.args["Optimization"]
-        df_max = opt.get("min_df_torque_nm", 20.0)
-        n = opt["n_exploration"]
-        if n <= 1:
-            return df_max
-        return df_max * (trial_idx / (n - 1))
+        max_pf_nm = opt.get("max_pf_torque_nm", 90.0)
+        max_df_nm = opt.get("max_df_torque_nm", 10.0)  # Rubber band limit
+        slack_threshold = opt.get("slack_at_neutral_max_torque", 2.0)
+        pf_range = opt.get("pf_check_angle_range", [0.0, 30.0])
+        df_range = opt.get("df_check_angle_range", [-30.0, 0.0])
+        n_pts = 100
+        
+        details = {
+            'max_pf': None,
+            'max_df': None,
+            'at_zero': None,
+            'polarity': 'neutral',
+            'reason': None,
+        }
+        
+        # Determine which direction this config is assisting
+        pf_angles = np.linspace(pf_range[0], pf_range[1], n_pts)
+        df_angles = np.linspace(df_range[0], df_range[1], n_pts)
+        pf_torques = [compute_exo_torque(a, L0, attach) for a in pf_angles]
+        df_torques = [compute_exo_torque(a, L0, attach) for a in df_angles]
+        
+        max_pf = max(pf_torques)
+        max_df_abs = max([abs(t) for t in df_torques])
+        
+        details['max_pf'] = max_pf
+        details['max_df'] = max_df_abs
+        
+        # Slack at neutral (HARD CONSTRAINT)
+        torque_at_zero = abs(compute_exo_torque(0.0, L0, attach))
+        details['at_zero'] = torque_at_zero
+        
+        if torque_at_zero > slack_threshold:
+            details['reason'] = f"Slack: |torque@0°|={torque_at_zero:.2f}Nm > {slack_threshold:.1f}Nm"
+            return False, details
+        
+        # ========== REGION SLACK CONSTRAINT (FIRST) ==========
+        # DF-assist: entire DF region [-30°, 0°] must be slack
+        # PF-assist: entire PF region [0°, 30°] must be slack
+        
+        if attach > 0.05:  # DF-assist: DF region must be slack, PF region must be negative
+            details['polarity'] = 'DF-assist'
+            df_check_angles = np.linspace(-30, 0, 50)
+            df_check_torques = [abs(compute_exo_torque(a, L0, attach)) for a in df_check_angles]
+            max_df_in_region = max(df_check_torques)
+            
+            if max_df_in_region > 2.0:
+                details['reason'] = f"DF-assist: DF region [-30°,0°] max={max_df_in_region:.2f}Nm > 2.0Nm (must be slack)"
+                return False, details
+            
+            # Check PF region is NEGATIVE (DF resistance)
+            pf_check_angles = np.linspace(0, 30, 50)
+            pf_check_torques = [compute_exo_torque(a, L0, attach) for a in pf_check_angles]
+            if any(t > -0.5 for t in pf_check_torques):  # Allow small positive due to numerical noise
+                details['reason'] = f"DF-assist: PF region must be negative torque, found positive"
+                return False, details
+            
+            # Also check max DF torque limit
+            if max_df_abs > max_df_nm:
+                details['reason'] = f"DF-assist: DF peak {max_df_abs:.1f}Nm > {max_df_nm:.1f}Nm limit"
+                return False, details
+        
+        elif attach < -0.05:  # PF-assist: PF region must be slack, DF region must be positive
+            details['polarity'] = 'PF-assist'
+            pf_check_angles = np.linspace(0, 30, 50)
+            pf_check_torques = [abs(compute_exo_torque(a, L0, attach)) for a in pf_check_angles]
+            max_pf_in_region = max(pf_check_torques)
+            
+            if max_pf_in_region > 2.0:
+                details['reason'] = f"PF-assist: PF region [0°,30°] max={max_pf_in_region:.2f}Nm > 2.0Nm (must be slack)"
+                return False, details
+            
+            # Check DF region is POSITIVE (PF assistance)
+            df_check_angles = np.linspace(-30, 0, 50)
+            df_check_torques = [compute_exo_torque(a, L0, attach) for a in df_check_angles]
+            if any(t < 0.5 for t in df_check_torques):  # Allow small negative due to numerical noise
+                details['reason'] = f"PF-assist: DF region must be positive torque, found negative"
+                return False, details
+            
+            # Also check max PF torque limit
+            if max_pf > max_pf_nm:
+                details['reason'] = f"PF-assist: PF peak {max_pf:.1f}Nm > {max_pf_nm:.1f}Nm limit"
+                return False, details
+        
+        else:  # Neutral (attach ≈ 0)
+            details['polarity'] = 'neutral'
+            # Both regions near zero naturally, very safe
+            pass
+        
+        return True, details
 
     # =======================================================================
     # Exploration: Latin Hypercube Sampling with safety filtering
     # =======================================================================
 
-    def _generate_initial_parameters(self) -> None:
-        """Generate exploration parameters using Latin Hypercube Sampling (LHS).
 
-        LHS divides each parameter dimension into n equal intervals and places
-        exactly one sample per interval — guaranteeing good coverage of the full
-        parameter space regardless of safety filtering.
-
-        Per-trial safety constraints (fully preserved):
-          - Always:      hard 90 Nm cap + PF zone cap
-          - Trial 1:     DF min = 0 Nm  (no engagement required)
-          - Trial N:     DF min = min_df_torque_nm from config
-          - Intermediate: linearly interpolated
-
-        Falls back to random sampling if LHS pool is exhausted.
-        """
-        opt_args = self.args["Optimization"]
-        range_ = np.array(list(opt_args["range"]))
-        pf_zone = opt_args.get("pf_zone_deg", [2.0, 20.0])
-        pf_threshold = opt_args.get("pf_torque_threshold", 4.0)
-        df_angle = opt_args.get("df_check_angle_deg", -10.0)
-        n_needed = opt_args["n_exploration"]
-        n_parms = opt_args["n_parms"]
-
-        print(f"\n###### Generating {n_needed} LHS exploration parameters ######")
-        print(f"   Sampling method:  Latin Hypercube Sampling (LHS)")
-        print(f"   PF zone:          {pf_zone[0]}° to {pf_zone[1]}°  "
-              f"(max {pf_threshold} Nm)")
-        print(f"   DF ramp:          0 Nm (trial 1) → "
-              f"{opt_args.get('min_df_torque_nm', 20.0)} Nm (trial {n_needed})")
-        print(f"   Hard cap:         {HARD_TORQUE_CAP} Nm")
-
-        # LHS pool with 20x oversampling (to survive safety filtering)
-        lhs_pool_size = n_needed * 20
-        sampler = qmc.LatinHypercube(d=n_parms)  # no seed → different per subject
-        lhs_unit = sampler.random(n=lhs_pool_size)
-        lhs_scaled = qmc.scale(lhs_unit, range_[0], range_[1])
-
-        print(f"\n   LHS pool: {lhs_pool_size} candidates generated")
-        for dim_idx, (dim_min, dim_max, name) in enumerate(zip(
-                range_[0], range_[1], ["R", "L0"])):
-            dim_vals = lhs_scaled[:, dim_idx]
-            print(f"   {name} coverage: {dim_vals.min():.4f} → "
-                  f"{dim_vals.max():.4f} (full: {dim_min:.4f} → {dim_max:.4f})")
-
-        safe_params = []
-        lhs_idx = 0
-
-        for trial_idx in range(n_needed):
-            trial_num = trial_idx + 1
-            df_min = self._get_exploration_df_min(trial_idx)
-
-            df_max_config = opt_args.get("min_df_torque_nm", 20.0)
-            df_pct = (df_min / df_max_config * 100) if df_max_config > 0 else 0
-
-            print(f"\n   ── Trial {trial_num}/{n_needed} ──")
-            print(f"   DF min = {df_min:.2f} Nm  "
-                  f"({df_pct:.0f}% of max {df_max_config} Nm)")
-
-            found = False
-
-            # Pass 1: LHS pool in order
-            while lhs_idx < len(lhs_scaled):
-                candidate = lhs_scaled[lhs_idx]
-                lhs_idx += 1
-                R, L0 = candidate[0], candidate[1]
-
-                is_safe, max_pf, df_torque, max_total = self._is_safe_candidate(
-                    R, L0, pf_zone, pf_threshold,
-                    df_min=df_min, df_check_angle=df_angle,
-                )
-
-                if is_safe:
-                    safe_params.append(candidate)
-                    print(f"   ✅ LHS  R={R:.4f}  L0={L0:.4f} "
-                          f"| PF={max_pf:.2f} Nm  DF={df_torque:.2f} Nm  "
-                          f"max={max_total:.2f} Nm  (pool idx {lhs_idx})")
-                    found = True
-                    break
-
-            # Pass 2: LHS pool exhausted → random fallback
-            if not found:
-                print(f"   ⚠️  LHS pool exhausted for trial {trial_num} — "
-                      f"falling back to random sampling")
-
-                df_min_try = df_min
-                for attempt in range(3000):
-                    if attempt == 2000:
-                        df_min_try = df_min * 0.5
-                        print(f"   🔄 Relaxing DF min to {df_min_try:.2f} Nm "
-                              f"after 2000 attempts")
-
-                    candidate = np.random.uniform(range_[0], range_[1])
-                    R, L0 = candidate[0], candidate[1]
-
-                    is_safe, max_pf, df_torque, max_total = self._is_safe_candidate(
-                        R, L0, pf_zone, pf_threshold,
-                        df_min=df_min_try, df_check_angle=df_angle,
-                    )
-
-                    if is_safe:
-                        safe_params.append(candidate)
-                        print(f"   ✅ Random  R={R:.4f}  L0={L0:.4f} "
-                              f"| PF={max_pf:.2f} Nm  DF={df_torque:.2f} Nm  "
-                              f"(attempt {attempt+1})")
-                        found = True
-                        break
-
-                if not found:
-                    fallback = np.random.uniform(range_[0], range_[1])
-                    safe_params.append(fallback)
-                    print(f"   ⚠️  Using unconstrained fallback for trial {trial_num}")
-
-        self.x = np.array(safe_params)
-
-        print(f"\n###### Final LHS exploration parameters ######")
-        print(f"{'Trial':<8} {'R (m)':<10} {'L0 (m)':<10} "
-              f"{'DF min (Nm)':<14} {'DF % of max'}")
-        print("─" * 55)
-        for i, p in enumerate(self.x):
-            df_min_i = self._get_exploration_df_min(i)
-            df_max_cfg = opt_args.get("min_df_torque_nm", 20.0)
-            df_pct_i = (df_min_i / df_max_cfg * 100) if df_max_cfg > 0 else 0
-            print(f"   {i+1:<5} {p[0]:<10.4f} {p[1]:<10.4f} "
-                  f"{df_min_i:<14.2f} {df_pct_i:.0f}%")
 
     # =======================================================================
     # BO safety shim: validate every GP suggestion before committing it
     # =======================================================================
 
     def _get_safe_bo_suggestion(self, raw_suggestion: np.ndarray) -> np.ndarray:
-        """Validate BO-suggested params — enforces ALL hard constraints:
-          - 90 Nm absolute cap
-          - PF zone cap
-          - DF minimum hard floor during BO (df_min_bo_nm)
+        """Validate BO-suggested params — enforces all safety constraints.
 
         Strategy:
           1. Try the BO's argmax suggestion. If safe, return it.
           2. If unsafe, evaluate the acquisition function across a dense grid
              of the parameter space, rank by EI value, and walk down the
-             ranking returning the first safe point. This preserves the BO's
-             ranking of "promising" regions rather than reverting to random.
-          3. As a last resort (almost never reached), random sample.
-
-        Top-K ranked fallback is theoretically much better than random:
-          - Random sampling: throws away all GP information, picks an
-            arbitrary point that is unlikely to be informative
-          - Top-K ranked: stays in the high-EI region (where the GP wanted
-            to look), just sidesteps the unsafe sub-region
+             ranking returning the first safe point.
+          3. As a last resort, random sample.
         """
-        opt = self.args["Optimization"]
-        pf_zone = opt.get("pf_zone_deg", [2.0, 20.0])
-        pf_threshold = opt.get("pf_torque_threshold", 4.0)
-        df_angle = opt.get("df_check_angle_deg", -10.0)
-        df_min_bo = opt.get("df_min_bo_nm", 5.0)
-        range_ = np.array(list(opt["range"]))
-        n_parms = opt["n_parms"]
-
         candidate = raw_suggestion.flatten()
-        R, L0 = candidate[0], candidate[1]
+        L0, attach = candidate[0], candidate[1]
+        n_parms = self.args["Optimization"]["n_parms"]
 
         # ── Step 1: try BO's actual argmax ──
-        is_safe, max_pf, df_torque, max_total = self._is_safe_candidate(
-            R, L0, pf_zone, pf_threshold,
-            df_min=df_min_bo, df_check_angle=df_angle,
-        )
+        is_safe, details = self._is_safe_candidate(L0, attach)
 
         if is_safe:
-            print(f"   ✅ BO suggestion passed (PF={max_pf:.2f} Nm, "
-                  f"DF={df_torque:.2f} Nm, max={max_total:.2f} Nm)")
+            print(f"   ✅ BO suggestion passed (PF={details['max_pf']:.2f}Nm, "
+                  f"DF={details['max_df']:.2f}Nm, @0°={details['at_zero']:.2f}Nm)")
             return raw_suggestion
 
-        print(f"   ⚠️  BO suggestion R={R:.4f}, L0={L0:.4f} failed "
-              f"(PF={max_pf} Nm, DF={df_torque} Nm, max={max_total:.2f} Nm)")
+        print(f"   ⚠️  BO suggestion L0={L0:.4f}, attach={attach:.4f} failed")
+        print(f"      {details['reason']}")
         print(f"   🔍 Searching top-K acquisition rankings on grid...")
 
         # ── Step 2: top-K ranked fallback via acquisition function grid ──
         try:
-            safe_candidate, rank, ei_val = self._top_k_safe_fallback(
-                pf_zone, pf_threshold, df_min_bo, df_angle, range_,
-            )
+            opt = self.args["Optimization"]
+            range_ = np.array(list(opt["range"])).reshape(2, opt["n_parms"])
+            
+            safe_candidate, rank, ei_val = self._top_k_safe_fallback(range_)
             if safe_candidate is not None:
-                R, L0 = safe_candidate[0], safe_candidate[1]
-                _, max_pf, df_torque, max_total = self._is_safe_candidate(
-                    R, L0, pf_zone, pf_threshold,
-                    df_min=df_min_bo, df_check_angle=df_angle,
-                )
+                L0, attach = safe_candidate[0], safe_candidate[1]
+                is_safe, details = self._is_safe_candidate(L0, attach)
                 print(f"   ✅ Top-K safe fallback (rank #{rank}, EI={ei_val:.4f}): "
-                      f"R={R:.4f}, L0={L0:.4f} "
-                      f"(PF={max_pf:.2f} Nm, DF={df_torque:.2f} Nm, "
-                      f"max={max_total:.2f} Nm)")
+                      f"L0={L0:.4f}, attach={attach:.4f} "
+                      f"(PF={details['max_pf']:.2f}Nm, DF={details['max_df']:.2f}Nm)")
                 return safe_candidate.reshape(1, n_parms)
         except Exception as e:
             print(f"   ⚠️  Top-K fallback failed ({type(e).__name__}: {e}) — "
                   f"reverting to random sampling")
 
-        # ── Step 3: random sampling as final fallback (rarely reached) ──
+        # ── Step 3: random sampling as final fallback ──
         print(f"   🎲 Random sampling fallback...")
+        opt = self.args["Optimization"]
+        range_ = np.array(list(opt["range"])).reshape(2, opt["n_parms"])
+        
         for attempt in range(500):
             candidate = np.random.uniform(range_[0], range_[1])
-            R, L0 = candidate[0], candidate[1]
-            is_safe, max_pf, df_torque, max_total = self._is_safe_candidate(
-                R, L0, pf_zone, pf_threshold,
-                df_min=df_min_bo, df_check_angle=df_angle,
-            )
+            L0, attach = candidate[0], candidate[1]
+            is_safe, details = self._is_safe_candidate(L0, attach)
             if is_safe:
                 print(f"   ✅ Random replacement at attempt {attempt+1}: "
-                      f"R={R:.4f}, L0={L0:.4f} (DF={df_torque:.2f} Nm)")
+                      f"L0={L0:.4f}, attach={attach:.4f}")
                 return candidate.reshape(1, n_parms)
 
-        print(f"   ⚠️  No safe replacement found after 500 random attempts — "
-              f"using original BO suggestion.")
+        print(f"   ⚠️  No safe replacement found — using original BO suggestion.")
         return raw_suggestion
 
-    def _top_k_safe_fallback(self,
-                              pf_zone: list, pf_threshold: float,
-                              df_min: float, df_angle: float,
-                              range_: np.ndarray,
-                              n_grid: int = 50,
-                              ):
-        """Walk down ranked acquisition function values, return first safe point.
-
-        Builds a `n_grid` × `n_grid` grid over the parameter space, evaluates
-        the GP's acquisition function (qNoisyExpectedImprovement) at every
-        grid point, sorts by EI value descending, and walks down the list
-        checking safety. Returns the first safe candidate.
-
-        Returns
-        -------
-        candidate : np.ndarray | None    safe (R, L0) point, or None if no
-                                          grid point is safe
-        rank      : int                   1-indexed rank in the EI ordering
-                                          (1 = highest EI safe point)
-        ei_val    : float                 acquisition value at returned point
-        """
+    def _top_k_safe_fallback(self, range_: np.ndarray, n_grid: int = 50):
+        """Walk down ranked acquisition function values, return first safe point."""
         import torch
         from botorch.acquisition import qNoisyExpectedImprovement
         from botorch.sampling import IIDNormalSampler
 
-        # Build a dense grid over the physical parameter space
         n_parms = self.args["Optimization"]["n_parms"]
         if n_parms != 2:
-            # Method as written assumes 2D — for higher dims, would need
-            # different sampling strategy
             return None, 0, 0.0
 
-        R_vals = np.linspace(range_[0, 0], range_[1, 0], n_grid)
-        L0_vals = np.linspace(range_[0, 1], range_[1, 1], n_grid)
-        RR, LL = np.meshgrid(R_vals, L0_vals)
-        grid_phys = np.column_stack([RR.ravel(), LL.ravel()])
+        L0_vals = np.linspace(range_[0, 0], range_[1, 0], n_grid)
+        attach_vals = np.linspace(range_[0, 1], range_[1, 1], n_grid)
+        LL, AA = np.meshgrid(L0_vals, attach_vals)
+        grid_phys = np.column_stack([LL.ravel(), AA.ravel()])
 
         # Normalize to [0,1] for the GP
         if self.NORMALIZATION:
@@ -513,31 +388,19 @@ class HIL_Exo:
 
         # Walk down the ranking
         for ranking, idx in enumerate(ranked_indices, start=1):
-            R_cand, L0_cand = grid_phys[idx]
-            is_safe, _, _, _ = self._is_safe_candidate(
-                R_cand, L0_cand, pf_zone, pf_threshold,
-                df_min=df_min, df_check_angle=df_angle,
-            )
+            L0_cand, attach_cand = grid_phys[idx]
+            is_safe, _ = self._is_safe_candidate(L0_cand, attach_cand)
             if is_safe:
                 return grid_phys[idx], ranking, float(ei_values[idx])
 
-        # No safe point found in the entire grid (very unlikely)
         return None, 0, 0.0
-
 
     # =======================================================================
     # Best-so-far tracking helper
     # =======================================================================
 
     def _best_so_far_idx(self) -> int:
-        """Return index of best trial in self.y_opt under the configured paradigm.
-
-        In signed mode: minimize |y - si_target| (distance from target asymmetry).
-        In unsigned mode: minimize y directly.
-
-        This is the single source of truth for "best so far" rankings across
-        the terminal driver, logs, and any UI code reading the result history.
-        """
+        """Return index of best trial in self.y_opt under the configured paradigm."""
         if self.signed:
             return int(np.argmin(np.abs(self.y_opt - self.si_target)))
         return int(np.argmin(self.y_opt))
@@ -551,31 +414,25 @@ class HIL_Exo:
         print(f"   TRIAL {trial_num}/{self.args['Optimization']['n_steps']}")
         print("🎯" * 30)
         if trial_num <= self.args["Optimization"]["n_exploration"]:
-            df_min = self._get_exploration_df_min(trial_num - 1)
-            df_max = self.args["Optimization"].get("min_df_torque_nm", 20.0)
-            df_pct = (df_min / df_max * 100) if df_max > 0 else 0
             print(f"   [Exploration {trial_num}/"
                   f"{self.args['Optimization']['n_exploration']}]")
-            print(f"   [DF min this trial: {df_min:.2f} Nm — {df_pct:.0f}% of max]")
         else:
             print(f"   [Optimization — Bayesian]")
         print(f"\n{'PARAMETERS TO ENTER:':^60}")
         print("─" * 60)
-        param_names = ["R", "L0"]
+        param_names = ["L0 (m)", "Attach"]
         for name, val in zip(param_names[:len(params)], params):
-            print(f"  {name:3s} = {val:.4f}")
+            if name == "L0 (m)":
+                print(f"  {name:8s} = {val:.4f}  ({val*100:.1f} cm)")
+            else:
+                print(f"  {name:8s} = {val:+.2f}")
         print("─" * 60 + "\n")
 
     def start(self):
-        """Run the full experiment interactively in the terminal.
-
-        For Streamlit UI usage, see apps/run_experiment.py — it calls
-        _generate_initial_parameters, _get_safe_bo_suggestion, etc. directly
-        and manages the trial loop via the web interface.
-        """
+        """Run the full experiment interactively in the terminal."""
         if self.n == 0:
             print(f"\n{'='*70}")
-            print(f"STARTING HIL EXOSKELETON OPTIMIZATION")
+            print(f"STARTING HIL EXOSKELETON OPTIMIZATION (L0, attach)")
             print(f"Cost Function: {self.cost.cost_name}")
             print(f"Parameters: {self.args['Optimization']['n_parms']}")
             print(f"Total Trials: {self.args['Optimization']['n_steps']}")
@@ -583,7 +440,10 @@ class HIL_Exo:
             print(f"Exploration Sampling: Latin Hypercube Sampling (LHS)")
             print(f"BO Direction: MINIMIZING {self._bo_direction_str} "
                   f"(signed={self.signed}, si_target={self.si_target:+.1f})")
-            print(f"Hard Torque Cap: {HARD_TORQUE_CAP} Nm")
+            print(f"Torque constraints:")
+            print(f"  - Max PF [0°, 30°]: 60 Nm")
+            print(f"  - Max DF [-30°, 0°]: -10 Nm")
+            print(f"  - Slack at 0°: < 2 Nm")
             print(f"{'='*70}\n")
             self._generate_initial_parameters()
 
@@ -592,7 +452,7 @@ class HIL_Exo:
             self.print_trial_parameters(trial_num, self.x[self.n])
 
             print("📝 INSTRUCTIONS:")
-            print("  1. Enter parameters into Computer 2 exoskeleton controller")
+            print("  1. Set spring rest length (L0) and foot attachment (attach)")
             print("  2. Start LabRecorder:")
             print("     - Update streams, check 'polar accel left' AND 'polar accel right'")
             print(f"     - Set filename: trial_{trial_num:02d}.xdf")
@@ -627,10 +487,10 @@ class HIL_Exo:
                 dist = abs(cost_value - self.si_target)
                 print(f"\n✅ Recorded: Cost (raw SI) = {cost_value:+.4f}  "
                       f"|  |SI - target| = {dist:.4f}  "
-                      f"for params {self.x_opt[-1]}")
+                      f"for params L0={self.x_opt[-1, 0]:.4f}, attach={self.x_opt[-1, 1]:+.2f}")
             else:
                 print(f"\n✅ Recorded: Cost = {cost_value:.4f} "
-                      f"for params {self.x_opt[-1]}")
+                      f"for params L0={self.x_opt[-1, 0]:.4f}, attach={self.x_opt[-1, 1]:+.2f}")
             self.n += 1
 
             if (self.n >= self.args["Optimization"]["n_exploration"]
@@ -645,7 +505,6 @@ class HIL_Exo:
                         norm_y.reshape(self.n, -1))
                     new_parameter = self._denormalize_x(new_parameter)
                 else:
-                    # CHANGED: distance-from-target for signed mode
                     if self.signed:
                         y_for_bo = -np.abs(self.y_opt - self.si_target)
                     else:
@@ -655,23 +514,23 @@ class HIL_Exo:
                         y_for_bo.reshape(self.n, -1),
                     )
                 new_parameter = self._get_safe_bo_suggestion(new_parameter)
-                print(f"   Next suggested parameters: {new_parameter.flatten()}")
+                print(f"   Next suggested parameters: L0={new_parameter.flatten()[0]:.4f}, "
+                      f"attach={new_parameter.flatten()[1]:+.2f}")
                 self.x = np.concatenate((
                     self.x,
                     new_parameter.reshape(
                         1, self.args["Optimization"]["n_parms"])
                 ), axis=0)
 
-            # CHANGED: best-so-far uses configured target
             best_idx = self._best_so_far_idx()
             if self.signed:
                 best_dist = abs(self.y_opt[best_idx] - self.si_target)
                 print(f"\n📊 Best so far: SI={self.y_opt[best_idx]:+.4f}  "
                       f"|  |SI - target| = {best_dist:.4f}  "
-                      f"|  Params={self.x_opt[best_idx]}")
+                      f"|  L0={self.x_opt[best_idx, 0]:.4f}, attach={self.x_opt[best_idx, 1]:+.2f}")
             else:
                 print(f"\n📊 Best so far: Cost={self.y_opt[best_idx]:.4f} | "
-                      f"Params={self.x_opt[best_idx]}")
+                      f"L0={self.x_opt[best_idx, 0]:.4f}, attach={self.x_opt[best_idx, 1]:+.2f}")
 
             if self.n < self.args["Optimization"]["n_steps"]:
                 input("\nPress ENTER to continue to next trial...")
@@ -688,9 +547,10 @@ class HIL_Exo:
                   f"(target = {self.si_target:+.1f})")
         else:
             print(f"  Cost: {self.y_opt[best_idx]:.4f}")
-        print(f"  Parameters: {self.x_opt[best_idx]}")
+        print(f"  L0:                {self.x_opt[best_idx, 0]:.4f} m ({self.x_opt[best_idx, 0]*100:.1f} cm)")
+        print(f"  Attachment:        {self.x_opt[best_idx, 1]:+.2f}")
         print(f"\nAll parameters saved to: "
               f"{self.args['Optimization']['model_save_path']}")
 
 
-__all__ = ["HIL_Exo", "HARD_TORQUE_CAP"]
+__all__ = ["HIL_Exo"]

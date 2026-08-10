@@ -1,33 +1,22 @@
 """
 hitlo.cost — BO cost function: step-time symmetry + exoskeleton spring penalty.
 
+UPDATED: (L0, attach) parameterization with R fixed at 0.28 m.
+         Torque constraints: 90 Nm PF max, 10 Nm DF max, slack at 0°.
+
 This module is the glue between the detection pipeline (hitlo.detection),
 the symmetry metric (hitlo.symmetry), and the Bayesian optimization loop.
 
 The `SymmetryCost` class is the object that HIL_Exo calls each trial to
-evaluate the current (R, L0) parameter suggestion.
+evaluate the current (L0, attach) parameter suggestion.
 
-Version 2.1.0 (adds signed target asymmetry for Patton paradigm):
-  - SymmetryCost now takes an si_target parameter
-  - SI sign convention preserved through the analysis (per-stride is always
-    signed; aggregated value is signed iff `signed=True`)
-  - The TARGET-DISTANCE math (|SI - si_target|) is applied downstream in
-    hitlo.hil_exo._mean_normalize_y, NOT here — this module returns the
-    raw signed SI so that QC/logging can see the actual value, not a
-    distance from target.
-  - si_target = 0.0 (default) reproduces v2.0.0 behavior exactly
-
-Version 2.0.0 (refactored from symmetry_cost.py v1.8.0):
-  - Detection logic moved to hitlo.detection (shared with diagnostic tool)
-  - Symmetry logic moved to hitlo.symmetry
-  - I/O logic moved to hitlo.io
-  - This file contains only the BO-specific glue: the class wrapper,
-    spring-torque penalty math, and the per-trial orchestration.
-
-Paradigm flexibility (set via Cost.si_target in config):
-  - si_target =   0.0 → BO drives SI toward 0 (Aim 2 stroke, minimize asymmetry)
-  - si_target = -10.0 → BO drives SI toward -10 (Aim 1 healthy, induce
-                        left-paretic-like asymmetry via passive band)
+Version 2.2.1 (L0, attach parameterization with torque constraints):
+  - Search space: (L0, attach_ratio) instead of (R, L0)
+  - R = 0.28 m is now FIXED (anchor distance)
+  - L0 (spring rest length) controls engagement timing
+  - attach_ratio controls direction + timing
+  - All three effects (magnitude, direction, timing) emerge from the 2D search
+  - Torque safety constraints enforced in hitlo.hil_exo, not here
 """
 
 from dataclasses import dataclass, field
@@ -44,23 +33,39 @@ from hitlo.io import load_both_polar_streams, load_polar_stream, trial_filename
 
 
 # ===========================================================================
-# Spring-torque model (physics of the passive exo)
+# Spring-torque model (physics of the passive exo with fixed R)
 # ===========================================================================
 
-def compute_exo_torque(ankle_angle_deg: float, R: float, L0: float) -> float:
+def compute_exo_torque(ankle_angle_deg: float, L0: float, attach_ratio: float) -> float:
     """Ankle torque produced by the passive spring at a given ankle angle.
 
-    Physical model of the LegExoNET spring-pulley mechanism: given anchor
-    position R (m from ankle pivot) and resting length L0 (m), compute the
+    Physical model of the LegExoNET spring-pulley mechanism: given resting
+    length L0 (m) and foot attachment ratio (dimensionless), compute the
     torque the stretched spring applies to the ankle at a given angle.
 
-    Conventions: positive ankle angle = plantarflexion (PF), negative = DF.
-    Positive torque = dorsiflexion assist (what we want during swing).
+    FIXED PARAMETERS:
+      R = 0.28 m (anchor distance from ankle pivot)
+      θ = 196° (anchor angle)
+
+    Parameters
+    ----------
+    ankle_angle_deg : float
+        Ankle angle in degrees. Positive = plantarflexion, negative = DF.
+    L0 : float
+        Spring rest length (m). Controls engagement timing.
+    attach_ratio : float
+        Foot attachment position as ratio along foot.
+        Negative = heel-side (PF direction), positive = toe-side (DF direction).
+
+    Returns
+    -------
+    float
+        Ankle torque in Nm. Positive = plantarflexor, negative = dorsiflexor.
     """
     k = 10500.0
     segment_length = 0.335
     theta = 196.0
-    attachment_ratio = -0.2
+    R_fixed = 0.28  # Fixed anchor distance
 
     ankle_x, ankle_y = 0.0, 0.0
 
@@ -76,12 +81,12 @@ def compute_exo_torque(ankle_angle_deg: float, R: float, L0: float) -> float:
     rotated_heel = R_ankle @ heel_rel + np.array([ankle_x, ankle_y])
     rotated_toe = R_ankle @ toe_rel + np.array([ankle_x, ankle_y])
 
-    attach_x = rotated_heel[0] + attachment_ratio * (rotated_toe[0] - rotated_heel[0])
-    attach_y = rotated_heel[1] + attachment_ratio * (rotated_toe[1] - rotated_heel[1])
+    attach_x = rotated_heel[0] + attach_ratio * (rotated_toe[0] - rotated_heel[0])
+    attach_y = rotated_heel[1] + attach_ratio * (rotated_toe[1] - rotated_heel[1])
 
     anchor_angle = theta - 90.0
-    anchor_x = ankle_x + R * np.cos(np.radians(anchor_angle))
-    anchor_y = ankle_y + R * np.sin(np.radians(anchor_angle))
+    anchor_x = ankle_x + R_fixed * np.cos(np.radians(anchor_angle))
+    anchor_y = ankle_y + R_fixed * np.sin(np.radians(anchor_angle))
 
     Ldist = np.sqrt((attach_x - anchor_x) ** 2 + (attach_y - anchor_y) ** 2)
     if np.isnan(Ldist) or np.isinf(Ldist) or Ldist <= 1e-6:
@@ -95,46 +100,79 @@ def compute_exo_torque(ankle_angle_deg: float, R: float, L0: float) -> float:
 
     lever_x = attach_x - ankle_x
     lever_y = attach_y - ankle_y
-    taudes = -(lever_x * force_y - lever_y * force_x)
-    if np.isnan(taudes) or np.isinf(taudes):
+    torque = -(lever_x * force_y - lever_y * force_x)
+    if np.isnan(torque) or np.isinf(torque):
         return 0.0
-    return float(taudes)
+    return float(torque)
 
 
-def compute_torque_curve(R: float, L0: float,
+def compute_torque_curve(L0: float, attach_ratio: float,
                          angle_min: float = -30.0,
                          angle_max: float = 30.0,
-                         n_points: int = 200
-                         ) -> Tuple[np.ndarray, np.ndarray]:
-    """Evaluate the torque model across a range of ankle angles (for plotting)."""
+                         n_points: int = 200) -> Tuple[np.ndarray, np.ndarray]:
+    """Evaluate the torque model across a range of ankle angles (for plotting).
+    
+    Parameters
+    ----------
+    L0 : float
+        Spring rest length (m)
+    attach_ratio : float
+        Foot attachment ratio
+    angle_min, angle_max : float
+        Ankle angle range (degrees)
+    n_points : int
+        Number of evaluation points
+    
+    Returns
+    -------
+    angles : ndarray
+        Ankle angles (degrees)
+    torques : ndarray
+        Torques at those angles (Nm)
+    """
     angles = np.linspace(angle_min, angle_max, n_points)
-    torques = np.array([compute_exo_torque(a, R, L0) for a in angles])
+    torques = np.array([compute_exo_torque(a, L0, attach_ratio) for a in angles])
     return angles, torques
 
 
-def compute_spring_penalty(R: float, L0: float,
+def compute_spring_penalty(L0: float, attach_ratio: float,
                            pf_zone: Tuple[float, float] = (2.0, 20.0),
                            df_angle: float = -10.0,
-                           lambda_pf: float = 1.0,
-                           mu_df: float = 0.5,
+                           lambda_pf: float = 0.0,
+                           mu_df: float = 0.0,
                            n_points: int = 200) -> float:
     """Shape penalty added to the symmetry cost.
 
-    Penalizes:
-      - large torques in the plantarflexion zone (should be ≈ 0 during PF)
-      - insufficient dorsiflexion assist at df_angle (we want positive torque)
-
-    NOTE: Disabled by default in current config (lambda_pf=0, mu_df=0). The
-    SI-distance term in hitlo.hil_exo drives convergence on its own under
-    the new paradigm. Re-enable these if you need to nudge HILBO toward
-    band-dominant solutions (e.g., for consistent -F* implementation across
-    Aim 2 stroke subjects).
+    Disabled by default (lambda_pf=0, mu_df=0). The SI-distance term in
+    hitlo.hil_exo drives convergence on its own under the new paradigm.
+    
+    Parameters
+    ----------
+    L0 : float
+        Spring rest length
+    attach_ratio : float
+        Foot attachment ratio
+    pf_zone : tuple
+        (lo, hi) ankle angles for plantarflexion zone
+    df_angle : float
+        Ankle angle to check for DF torque
+    lambda_pf : float
+        Weight on PF zone penalty
+    mu_df : float
+        Weight on DF reward
+    n_points : int
+        Number of points for evaluation
+    
+    Returns
+    -------
+    float
+        Penalty value
     """
     pf_angles = np.linspace(pf_zone[0], pf_zone[1], n_points)
-    pf_torques = np.array([compute_exo_torque(a, R, L0) for a in pf_angles])
+    pf_torques = np.array([compute_exo_torque(a, L0, attach_ratio) for a in pf_angles])
     pf_penalty = float(np.mean(pf_torques ** 2))
 
-    df_torque = compute_exo_torque(df_angle, R, L0)
+    df_torque = compute_exo_torque(df_angle, L0, attach_ratio)
     df_reward = max(df_torque, 0.0)
 
     return lambda_pf * pf_penalty - mu_df * df_reward
@@ -194,7 +232,7 @@ class SymmetryCost:
     >>> cost = SymmetryCost(trial_data_dir="/path/to/xdf/files",
     ...                     subject_id="P048", session="S001",
     ...                     signed=True, si_target=-10.0, trim_seconds=3.0)
-    >>> cost.set_params(R=0.08, L0=0.25)
+    >>> cost.set_params(L0=0.35, attach=0.5)
     >>> total_cost = cost.extract_cost_from_file(trial_num=1)
     """
 
@@ -204,13 +242,13 @@ class SymmetryCost:
                  session: str = "",
                  detection_cfg: Optional[DetectionConfig] = None,
                  # spring penalty
-                 lambda_pf: float = 0.01,
-                 mu_df: float = 0.005,
+                 lambda_pf: float = 0.0,
+                 mu_df: float = 0.0,
                  pf_zone: Tuple[float, float] = (2.0, 20.0),
                  df_angle: float = -10.0,
                  # symmetry behavior
                  signed: bool = False,
-                 si_target: float = 0.0,                # NEW
+                 si_target: float = 0.0,
                  trim_seconds: float = 3.0,
                  ):
         self.cost_name = "gait_symmetry"
@@ -225,13 +263,13 @@ class SymmetryCost:
         self.pf_zone = pf_zone
         self.df_angle = df_angle
         self.signed = signed
-        self.si_target = si_target                       # NEW
+        self.si_target = si_target
         self.trim_seconds = trim_seconds
 
-        self._R: Optional[float] = None
         self._L0: Optional[float] = None
+        self._attach: Optional[float] = None
 
-        print(f"✅ SymmetryCost v2.1.0 initialized")
+        print(f"✅ SymmetryCost v2.2.0 initialized (L0, attach parameterization)")
         print(f"   Mode:              {'SIGNED' if signed else 'UNSIGNED (abs)'}")
         if signed:
             print(f"   SI target:         {si_target:+.1f}%  "
@@ -245,11 +283,20 @@ class SymmetryCost:
               f"±{self.detection_cfg.stance_tolerance_pct*100:.0f}% of baseline")
         if trim_seconds > 0:
             print(f"   Steady-state trim: {trim_seconds:.1f}s from each end")
+        print(f"   Fixed R:           0.28 m (anchor distance)")
 
-    def set_params(self, R: float, L0: float) -> None:
-        """Set spring parameters for the current trial (for penalty calculation)."""
-        self._R = R
+    def set_params(self, L0: float, attach: float) -> None:
+        """Set parameters for the current trial (for penalty calculation).
+        
+        Parameters
+        ----------
+        L0 : float
+            Spring rest length (m)
+        attach : float
+            Foot attachment ratio (dimensionless)
+        """
         self._L0 = L0
+        self._attach = attach
 
     # ----- main entry points ---------------------------------------------
 
@@ -369,9 +416,9 @@ class SymmetryCost:
 
         # --- Spring penalty ---
         penalty = 0.0
-        if self._R is not None and self._L0 is not None:
+        if self._L0 is not None and self._attach is not None:
             penalty = compute_spring_penalty(
-                R=self._R, L0=self._L0,
+                L0=self._L0, attach_ratio=self._attach,
                 pf_zone=self.pf_zone, df_angle=self.df_angle,
                 lambda_pf=self.lambda_pf, mu_df=self.mu_df,
             )
@@ -386,14 +433,12 @@ class SymmetryCost:
             print(f"   Symmetry:          {si:+.2f}%  "
                   f"({'signed' if self.signed else 'unsigned'})")
             if self.signed:
-                # Show distance from target so the operator can see how close
-                # HILBO is to its convergence goal at a glance.
                 dist = abs(si - self.si_target)
                 print(f"   |SI - target|:     {dist:.2f}%  "
                       f"(target = {self.si_target:+.1f}%)")
-            if self._R is not None:
+            if self._L0 is not None:
                 print(f"   Spring penalty:    {penalty:.4f}  "
-                      f"(R={self._R:.4f}, L0={self._L0:.4f})")
+                      f"(L0={self._L0:.4f}, attach={self._attach:.4f})")
             print(f"\n✅ TOTAL COST = {total_cost:.4f}\n" + "=" * 60 + "\n")
 
         return TrialAnalysis(
@@ -418,10 +463,6 @@ class SymmetryCost:
 
         Kept for backward compatibility with old data collection configs.
         New experiments should use two shank sensors.
-
-        Note: signed SI is unreliable here because per-foot labeling is
-        ambiguous — for the target-asymmetry paradigm (Aim 1 healthy),
-        two-sensor mode is required.
         """
         stream = load_polar_stream(xdf_path, 'polar accel')
         if stream is None:
@@ -453,9 +494,9 @@ class SymmetryCost:
                                                  signed=self.signed)
 
         penalty = 0.0
-        if self._R is not None and self._L0 is not None:
+        if self._L0 is not None and self._attach is not None:
             penalty = compute_spring_penalty(
-                R=self._R, L0=self._L0,
+                L0=self._L0, attach_ratio=self._attach,
                 pf_zone=self.pf_zone, df_angle=self.df_angle,
                 lambda_pf=self.lambda_pf, mu_df=self.mu_df,
             )
