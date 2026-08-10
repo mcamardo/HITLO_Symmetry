@@ -1,5 +1,5 @@
 Subject:
-  id: P048
+  id: P062
   session: S001
   base_dir: /Users/maccamardo/HITLO_Data
 Cost:
@@ -7,23 +7,44 @@ Cost:
   sample_rate: 200
   time: 90
   signed: true
-  si_target: -10.0
+  si_target: -3.0
   trim_seconds: 3.0
 Optimization:
   n_parms: 2
   n_steps: 15
   n_exploration: 5
-  range:
-  - - 0.24
-    - 0.3
-  - - 0.35
+  manual_ramp_trials: 5
+  ramp_sequence:
+  - - 0.3367
     - 0.4
+  - - 0.3595
+    - 0.54
+  - - 0.3247
+    - -0.06
+  - - 0.3254
+    - -0.2
+  - - 0.3239
+    - -0.2
+  range:
+  - - 0.3
+    - -0.25
+  - - 0.38
+    - 0.75
   device: cpu
   normalize: true
   acquisition: ei
   kernel_function: se
   model_save_path: auto
   result_save_path: auto
+  max_pf_torque_nm: 60.0
+  pf_check_angle_range:
+  - 0.0
+  - 30.0
+  max_df_torque_nm: 4.0
+  df_check_angle_range:
+  - -30.0
+  - 0.0
+  slack_at_neutral_max_torque: 4.0
   pf_zone_deg:
   - 2.0
   - 20.0
@@ -34,9 +55,11 @@ Optimization:
   lambda_pf: 0
   mu_df: 0
 Parameters:
-  R:
-    name: Pulley Radius
-    unit: m
   L0:
     name: Spring Rest Length
     unit: m
+    description: Engagement timing (smaller = earlier engagement)
+  attach:
+    name: Foot Attachment Ratio
+    unit: dimensionless
+    description: Direction & timing (negative = PF-side, positive = DF-side)
