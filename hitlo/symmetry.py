@@ -30,8 +30,11 @@ Sign meaning:
 
 For a left-side LegExoNET device imitating left-paretic stroke gait, the
 expected perturbation direction is SI < 0 (longer left step time, mirroring
-the characteristic short-paretic-step pattern). HILBO targeting in
-hitlo.cost / hitlo.hil_exo is signed accordingly (si_target = -10.0).
+the characteristic short-paretic-step pattern). HILBO targeting is signed
+accordingly. For Aim 1 the target is NOT a fixed constant: it is derived
+per subject from their own baseline, amplified in whichever direction they
+already lean (see compute_baseline_target in apps/hitlo_console.py). For
+Aim 2 the target is 0.
 """
 
 from typing import Tuple, List
