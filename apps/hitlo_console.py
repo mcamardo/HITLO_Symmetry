@@ -47,8 +47,10 @@ subject's own baseline, not a fixed absolute SI. The baseline phase:
   1. Pre run-001 = no-device familiarization trial — IGNORED (not analyzed).
   2. Pre run-002 = THE baseline trial (band slack / no perturbation).
      Its signed SI alone defines baseline_si (no averaging).
-  3. Target is set to:  si_target = baseline_si - displacement
-     (always pushed more negative, matching the left-side device geometry)
+  3. 3. Target is set to:  si_target = baseline_si + sign(baseline_si) × displacement
+     (amplifies the subject's existing asymmetry in its own direction; inside
+      a ±1.5% deadband the sign isn't resolvable, so the device's default
+      direction is used)
   4. The computed target is written into the live config and drives the BO.
 
 Baseline files: task-Pre, run-001 (ignored), run-002 (the baseline)
@@ -442,20 +444,51 @@ def analyze_baseline(run_num: int) -> Optional[float]:
     return float(analysis.symmetry_index)
 
 
+# Below this |baseline SI|, the subject has no meaningful directional
+# asymmetry and sign(baseline) is a coin flip inside measurement noise.
+# Amplifying a sign you can't resolve would assign direction at random
+# across subjects, so these fall back to the device's default direction.
+BASELINE_DEADBAND_PCT = 1.5
+DEFAULT_DIRECTION = -1.0   # negative = longer left step (left-side device)
+
+
 def compute_baseline_target(baseline_si: float, displacement: float) -> float:
-    """Optimization target = baseline pushed `displacement`% more negative.
+    """Optimization target = the subject's own asymmetry, amplified.
 
-    baseline_si comes from the single Pre run-002 trial (run-001 is the
-    ignored no-device familiarization). No averaging.
+    The goal for Aim 1 is error augmentation: take whatever asymmetry the
+    subject already walks with and make it LARGER in the same direction, by a
+    fixed displacement. The induced displacement is the dose, held constant
+    across subjects; the direction belongs to the subject.
 
-    Always-negative rule: matches the left-side LegExoNET device geometry,
-    which perturbs gait toward SI < 0 (longer left step time). A subject who
-    starts at +2% gets target -8%; a subject at -3% gets target -13%. Either
-    way the *induced displacement* is a constant `displacement`% — that's the
-    error-augmentation 'dose' held fixed across subjects.
+        baseline -6%  -> target -16%   (already left-dominant, push further)
+        baseline +3%  -> target +13%   (already right-dominant, push further)
+
+    This replaces the earlier always-negative rule (target = baseline -
+    displacement), which was written when the device could only perturb one
+    way. That rule amplified negative-baseline subjects correctly but pushed
+    positive-baseline subjects THROUGH zero and out the other side: +3% became
+    -7%, which reverses their asymmetry rather than augmenting it, and makes
+    the delivered dose 10% for one subject and 3% for another.
+
+    Near zero, sign(baseline) is not resolvable — a subject at +0.2% is not
+    meaningfully right-dominant, and taking that sign at face value would hand
+    out directions at random. Inside the deadband we use DEFAULT_DIRECTION
+    instead, matching the left-side device geometry.
+
+    ASSUMPTION, NOT YET VERIFIED: that the device can drive SI in both
+    directions. The unified index spans dorsiflexor resistance through zero to
+    plantarflexor assistance, so bidirectional torque is available — but the
+    device is unilateral, and it is possible that both polarities perturb the
+    left limb the same way and move SI only one direction with different
+    magnitudes. If pilot data shows SI never crosses zero regardless of x, a
+    positive-baseline subject cannot be amplified and this rule cannot be met
+    for them.
     """
-    return baseline_si - displacement
-
+    if abs(baseline_si) < BASELINE_DEADBAND_PCT:
+        direction = DEFAULT_DIRECTION
+    else:
+        direction = 1.0 if baseline_si > 0 else -1.0
+    return baseline_si + direction * displacement
 
 # ===========================================================================
 # Config file editor (first page, before initialization)
@@ -1385,8 +1418,9 @@ def page_setup():
         if is_aim2:
             st.info("🩺 **Aim 2 stroke:** baseline skipped, target = 0.")
         else:
-            st.info("🧪 **Aim 1 healthy:** baseline phase runs first "
-                    "(Pre run-002), target = baseline − displacement.")
+           st.info("🧪 **Aim 1 healthy:** baseline phase runs first "
+                    "(Pre run-002), target = baseline amplified by the "
+                    "displacement in whichever direction the subject already leans.")
 
         pc4, pc5 = st.columns(2)
         with pc4:
@@ -1624,14 +1658,15 @@ def _baseline_phase(config):
         save to `{st.session_state.cost_extractor.trial_data_dir}`
         · walk {config['Cost']['time']} s.
 
-        **3. Analyze run-002 below.**
+       **3. Analyze run-002 below.**
         """)
 
     if st.session_state.baseline_si is not None:
-        st.success(f"Baseline SI (run-{BASELINE_TRIAL_RUN:03d}): "
+      st.success(f"Baseline SI (run-{BASELINE_TRIAL_RUN:03d}): "
                    f"**{st.session_state.baseline_si:+.2f}%**")
 
     cb1, cb2, cb3 = st.columns(3)
+
     with cb1:
         disp = st.number_input("Displacement (%)", value=10.0, min_value=1.0,
                                max_value=30.0, step=1.0, key="bl_disp")
@@ -1665,10 +1700,16 @@ def _baseline_phase(config):
             st.rerun()
 
     if st.session_state.baseline_si is not None:
-        pv = compute_baseline_target(float(st.session_state.baseline_si),
-                                     float(disp))
-        st.caption(f"→ target = {st.session_state.baseline_si:+.2f}% "
-                   f"− {disp:.0f}% = **{pv:+.2f}%**")
+        base = float(st.session_state.baseline_si)
+        pv = compute_baseline_target(base, float(disp))
+        if abs(base) < BASELINE_DEADBAND_PCT:
+            st.caption(f"→ baseline {base:+.2f}% is within ±{BASELINE_DEADBAND_PCT}% "
+                       f"of zero (no resolvable direction) — using the device's "
+                       f"default direction. Target = **{pv:+.2f}%**")
+        else:
+            arrow = "more positive" if base > 0 else "more negative"
+            st.caption(f"→ baseline {base:+.2f}%, amplified {disp:.0f}% "
+                       f"{arrow} = **{pv:+.2f}%**")
 
 
 def _optimization_phase(config, signed):
