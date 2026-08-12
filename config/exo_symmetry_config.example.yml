@@ -1,116 +1,108 @@
 # =============================================================================
-# HITLO_Symmetry — Experiment Configuration Template
+# HITLO_Symmetry — experiment configuration (EXAMPLE / TEMPLATE)
+#
+# Copy to exo_symmetry_config.yml and edit, or use the Setup page in the
+# console (streamlit run apps/hitlo_console.py), which writes this file for you.
+#
+# v3.0.0 — unified index parameterization.
+#
+# WHAT IS NOT IN THIS FILE, AND WHY
+# Torque caps, engagement filters, and the parameter bounds are NOT here. They
+# live in build_index_unified.m, which sweeps the four physical parameters,
+# filters for safety and torque shape, and writes index_unified.csv. Every
+# configuration BO can reach is a row of that file and was validated at build
+# time.
+#
+# That means: to change a safety limit or widen the search space, edit the
+# MATLAB builder and regenerate the CSV. Do not add limits back here. Two
+# places holding the same limit is how they end up disagreeing — the previous
+# version had a PF cap of 60 in this file while the code enforced 90.
 # =============================================================================
-#
-# This file controls every aspect of a HITLO experiment. Edit the values below
-# for your subject and session, then save. NO Python code changes are needed.
-#
-# To start a new session:
-#   1. Copy this file:  cp config/exo_symmetry_config.example.yml config/exo_symmetry_config.yml
-#   2. Edit Subject.id and Subject.session for your participant
-#   3. Run:  streamlit run apps/run_experiment.py
-#
-# Values shown are reasonable defaults. Tune Cost.lambda_pf and Cost.mu_df if
-# you want shape-aware optimization (currently disabled — pure symmetry).
-# =============================================================================
-
 
 Subject:
-  # Participant identifier (e.g. "P049"). Used in BIDS-style filenames:
-  #   sub-{id}_ses-{session}_task-Default_run-{NN}_eeg.xdf
   id: P001
-
-  # Session identifier — typically S001 for first visit, S002 for follow-up
   session: S001
-
-  # Where data is saved. The full path becomes:
-  #   {base_dir}/sub-{id}/ses-{session}/eeg/
-  base_dir: /Users/yourname/HITLO_Data
-
-
-# =============================================================================
-# Sensor configuration
-# =============================================================================
-
-sensors:
-  # MAC address suffixes for your Polar H10s (find via `python apps/collect_sensors.py left`)
-  # You'll see scan output that lists discoverable Polar devices with their IDs. (CHANGE THIS FOR YOUR SPECIFIC SENSORS)
-  left_id:  "7F302C25"
-  right_id: "80AE3629"
-
-  # Sample rate Polar H10 streams accel at — should be 200 (do not change)
-  sample_rate_hz: 200
-
-
-# =============================================================================
-# Optimization parameters
-# =============================================================================
-
-Optimization:
-  # Number of dimensions in the parameter space (R and L0 = 2)
-  n_parms: 2
-
-  # Total number of trials per session
-  n_steps: 15
-
-  # First N trials are LHS exploration; remaining (n_steps - n_exploration)
-  # are GP-driven Bayesian optimization
-  n_exploration: 5
-
-  # Parameter search box: [[R_min, L0_min], [R_max, L0_max]]
-  # R = anchor moment arm (m), L0 = spring rest length (m)
-  # These bounds are mechanism-specific — confirm before changing
-  range:
-    - [0.24, 0.30]    # mins
-    - [0.35, 0.40]    # maxes
-
-  # ---------------------------------------------------------------------------
-  # Safety constraints
-  # ---------------------------------------------------------------------------
-  # Plantarflexion zone — angles where the spring should NOT produce torque
-  # (during PF, the foot is going down; spring resistance there fights the user)
-  pf_zone_deg: [2.0, 20.0]
-
-  # Hard cap on spring torque inside the PF zone (Nm)
-  pf_torque_threshold: 4.0
-
-  # Dorsiflexion check angle (degrees, negative = DF direction)
-  # The DF reward / floor is computed at this specific angle
-  df_check_angle_deg: -10.0
-
-  # Minimum DF assist torque required during the BO phase (Nm)
-  # Set to 0 to allow zero-engagement springs in BO; set to ~5-10 to
-  # require minimum DF assistance.
-  df_min_bo_nm: 0.0
-
-  # Maximum DF assist target during exploration (Nm). Used to ramp DF
-  # constraints linearly from 0 (trial 1) to this value (trial n_exploration).
-  min_df_torque_nm: 20.0
-
-
-# =============================================================================
-# Cost function
-# =============================================================================
+  # Root of the BIDS-ish data tree. Trials are read from and written to
+  # <base_dir>/sub-<id>/ses-<session>/eeg/
+  base_dir: /Users/maccamardo/HITLO_Data
 
 Cost:
-  # Trial duration in seconds — how long the participant walks per trial
-  time: 60
+  # Aim 1 = neurotypical, induce a target asymmetry relative to the subject's
+  #         own baseline (a baseline phase runs first and overrides si_target).
+  # Aim 2 = stroke, drive toward symmetry (si_target fixed at 0, no baseline).
+  aim: Aim 1
 
-  # Drop the first/last N seconds of each trial (ramp-up/ramp-down)
-  trim_seconds: 3.0
+  sample_rate: 200        # Hz, Polar H10 accelerometer
+  time: 90                # trial duration in seconds
 
-  # Use signed symmetry (true) or absolute symmetry (false)
-  # Signed: BO sees direction of asymmetry, learns to push toward zero
-  # Unsigned: BO only sees magnitude, can't distinguish overshoot from undershoot
+  # signed=true requires TWO shank sensors. With one sternum sensor the sign
+  # of the symmetry index is unreliable, so a nonzero si_target is meaningless.
   signed: true
 
-  # ---------------------------------------------------------------------------
-  # Spring shape penalty weights
-  # ---------------------------------------------------------------------------
-  # lambda_pf: penalty for torque in the PF zone (>0 → discourage PF resistance)
-  # mu_df:     reward for DF assist at df_check_angle (>0 → encourage DF assist)
+  # Target symmetry index in percent. For Aim 1 this is only a fallback: the
+  # baseline phase computes si_target = baseline_si - displacement and
+  # overwrites it. For Aim 2 it is forced to 0.
+  si_target: -3.0
+
+  # Seconds trimmed from each end of a trial before analysis, to keep the
+  # measurement in steady-state walking.
+  trim_seconds: 3.0
+
+Optimization:
+  # ---------------------------------------------------------------------
+  # The search space. BO optimizes ONE number, x in [-1, +1]:
+  #     x = -1   max dorsiflexor stiffness (limited by the 24-band ceiling)
+  #     x =  0   zero torque
+  #     x = +1   max plantarflexor stiffness (limited by the torque cap)
+  # Each x resolves through this CSV into (R, theta, L0, attachment_ratio),
+  # the four values the operator sets on the device.
   #
-  # Set both to 0 for pure symmetry optimization (current default).
-  # Hard safety constraints (above) still apply regardless.
-  lambda_pf: 0.0
-  mu_df: 0.0
+  # x is NOT uniformly spaced: the two arms get different level counts, so DF
+  # steps are wider than PF steps. Code matches on nearest value in the x
+  # column and never computes a position arithmetically.
+  # ---------------------------------------------------------------------
+  index_csv: config/index_unified.csv
+
+  # Structural, not really tunable. One parameter, fixed range.
+  n_parms: 1
+  range:
+  - - -1.0
+  - - 1.0
+
+  n_steps: 15             # total trials, including the ramp
+  manual_ramp_trials: 5   # trials 1-N come from ramp_sequence; BO runs after
+
+  # Ramp x values, snapped to real table rows at load. Touch BOTH arms — if
+  # every ramp trial sits on one side, the GP has no data on the other when BO
+  # takes over, and with ~10 BO trials it may never go look.
+  ramp_sequence:
+  - 0.0
+  - 0.2
+  - -0.2
+  - 0.4
+  - -0.4
+
+  device: cpu
+  normalize: true         # map x to [0,1] for GP numerical stability
+  acquisition: ei
+  kernel_function: se
+
+  # 'auto' means the console fills these in under
+  # <base_dir>/sub-<id>/ses-<session>/derivatives/hil_optimization/
+  model_save_path: auto
+  result_save_path: auto
+
+Parameters:
+  x:
+    name: Unified Stiffness Index
+    unit: dimensionless
+    description: >
+      -1 = max dorsiflexor stiffness, 0 = zero torque, +1 = max plantarflexor.
+      Ordered on effective rotational stiffness (dtau/dtheta over the traversed
+      ROM), which anchors the search space to Collins/Wiggin/Sawicki 2015
+      (~180 Nm/rad). Maps to (R, theta, L0, attachment_ratio) via index_csv.
+
+      x = 0 is NOT device-off. The 24 rubber bands are always on, so the
+      controller must actively cancel them: tau_cable = 0 - tau_band(theta).
+      On the DF arm generally, the controller renders the target curve as
+      tau_cable = tau_desired - tau_band(theta).
