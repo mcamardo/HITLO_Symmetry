@@ -1,18 +1,32 @@
 """
 apps/hitlo_console.py — HITLO_Symmetry multi-page console.
 
-UPDATED for (L0, attach) parameterization with R fixed at 0.28 m.
+Version 3.0.0 — unified index parameterization.
+
+BO optimizes ONE number, x in [-1, +1], resolved through index_unified.csv into
+the four physical parameters the operator sets: (R, theta, L0, attachment_ratio).
+The console shows x for context but leads with the physical values, since x is
+meaningless at the bench.
 
 This is the clinician-facing tool. It:
   - Shows live Polar H10 streams so you can confirm sensors before each trial
   - Runs a BASELINE phase first (no-band "Pre" trials) to measure the
     subject's natural asymmetry, then computes the optimization target
     relative to that baseline
-  - Displays the (L0, attach) parameters the BO wants you to set this trial
-  - Shows the predicted torque curve for those parameters
+  - Displays the four physical parameters the BO wants you to set this trial
+  - Shows where that trial sits on the index (dose and stiffness)
   - After each trial, analyzes the XDF and shows a QC plot of heel strikes
-  - Tracks progress, cost, and the GP cost surface across trials
+  - Tracks progress, cost, and the GP posterior across trials
   - Auto-checkpoints so a crash doesn't lose your session
+
+WHAT CHANGED FROM 2.x
+The torque-curve plot is gone. It recomputed torque from a Python forward model
+that has since been deleted: that model ran at a different spring rate with R and
+theta hardcoded, so it described a device the index table does not build. The
+table already carries validated stiffness and dose per row, so the console plots
+those instead. The GP surface is now a 1-D posterior rather than a pair of 3-D
+surfaces over (L0, attach). Safety limits are no longer editable here — they live
+in build_index_unified.m, and changing them means regenerating the CSV.
 
 PARADIGM (Cost.si_target in config, OR set live from baseline)
 --------------------------------------------------------------
@@ -23,8 +37,8 @@ PARADIGM (Cost.si_target in config, OR set live from baseline)
 CONFIG EDITOR (first page)
 --------------------------
 On launch, before initialization, the operator edits the experiment config
-(subject, session, target paradigm, ranges, etc.) directly in the UI and
-saves it back to config/exo_symmetry_config.yml. No hand-editing the YAML.
+(subject, session, target paradigm, ramp, etc.) directly in the UI and saves it
+back to config/exo_symmetry_config.yml. No hand-editing the YAML.
 
 BASELINE-RELATIVE TARGETING (Aim 1)
 -----------------------------------
@@ -66,9 +80,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from hitlo.hil_exo import HIL_Exo
-from hitlo.cost import (
-    SymmetryCost, compute_torque_curve, compute_spring_penalty,
-)
+from hitlo.cost import SymmetryCost
 from hitlo.detection import detect_heelstrikes_full, DetectionConfig
 from hitlo.io import load_both_polar_streams, trial_filename
 from hitlo.symmetry import (
@@ -83,8 +95,9 @@ BASELINE_TASK = "Pre"
 BASELINE_IGNORE_RUN = 1
 BASELINE_TRIAL_RUN = 2
 
-# Fixed anchor distance (no longer optimized)
-R_FIXED = 0.28
+# Collins/Wiggin/Sawicki 2015 metabolically-optimal ankle stiffness, drawn on
+# the index plot as a literature reference.
+COLLINS_NM_PER_RAD = 180.0
 
 
 # ===========================================================================
@@ -121,6 +134,10 @@ def _distance_from_target(cost_value: float, config: dict) -> float:
     if _signed_mode(config):
         return abs(cost_value - _si_target(config))
     return abs(cost_value)
+
+
+def _direction_label(direction: int) -> str:
+    return 'PF' if direction > 0 else 'DF' if direction < 0 else 'ZERO'
 
 
 # ===========================================================================
@@ -183,6 +200,11 @@ def save_checkpoint() -> None:
             'x_opt': hil.x_opt.tolist() if len(hil.x_opt) > 0 else [],
             'y_opt': hil.y_opt.tolist() if len(hil.y_opt) > 0 else [],
             'n': hil.n,
+            # Which table produced these x values. If the CSV is regenerated
+            # mid-study the same x means a different configuration, so a
+            # checkpoint from the old table is not resumable against the new one.
+            'index_csv': str(hil.table.path),
+            'n_levels': len(hil.table),
             # Paradigm + baseline settings, so we can detect a config change
             # on resume and restore the baseline-derived target.
             'signed': _signed_mode(config),
@@ -285,7 +307,6 @@ def initialize_system(fresh_start: bool = False) -> Tuple[bool, bool]:
     os.makedirs(config['Optimization']['result_save_path'], exist_ok=True)
     os.makedirs(eeg_dir, exist_ok=True)
 
-    opt = config['Optimization']
     signed = _signed_mode(config)
     si_target = _si_target(config)
     trim_s = config['Cost'].get('trim_seconds', 3.0)
@@ -294,17 +315,19 @@ def initialize_system(fresh_start: bool = False) -> Tuple[bool, bool]:
         trial_data_dir=eeg_dir,
         subject_id=subject,
         session=session,
-        lambda_pf=opt.get('lambda_pf', 0.01),
-        mu_df=opt.get('mu_df', 0.005),
-        pf_zone=tuple(opt.get('pf_zone_deg', [2.0, 20.0])),
-        df_angle=opt.get('df_check_angle_deg', -10.0),
         signed=signed,
         si_target=si_target,
         trim_seconds=trim_s,
     )
 
-    st.session_state.hil = HIL_Exo(
-        st.session_state.config, st.session_state.cost_extractor)
+    # HIL_Exo loads and validates the index table. A missing or malformed CSV
+    # raises here, at setup, rather than mid-session with a subject waiting.
+    try:
+        st.session_state.hil = HIL_Exo(
+            st.session_state.config, st.session_state.cost_extractor)
+    except (FileNotFoundError, ValueError) as e:
+        st.error(f"Could not load the index table: {e}")
+        return False, False
 
     ckpt = None if fresh_start else load_checkpoint(config)
     resumed = False
@@ -317,16 +340,34 @@ def initialize_system(fresh_start: bool = False) -> Tuple[bool, bool]:
         ckpt_signed = ckpt.get('signed', None)
         if ckpt_signed is not None and ckpt_signed != signed:
             st.warning(
-                f"⚠️ Checkpoint paradigm mismatch: checkpoint had "
+                f"Checkpoint paradigm mismatch: checkpoint had "
                 f"signed={ckpt_signed}; config has signed={signed}. "
-                f"Refusing to resume — use 🆕 Fresh Start, or revert the "
+                f"Refusing to resume — use Fresh Start, or revert the "
                 f"config to match the checkpoint."
             )
             return False, False
+
+        # Detect an index-table change. x values are only meaningful against
+        # the table that produced them: regenerate the CSV with different
+        # level counts or a different band ceiling and x = -1 now points at a
+        # different configuration. Resuming across that would silently mix
+        # two search spaces in one dataset.
+        ckpt_levels = ckpt.get('n_levels', None)
+        if ckpt_levels is not None and ckpt_levels != len(st.session_state.hil.table):
+            st.warning(
+                f"Index table mismatch: checkpoint ran against {ckpt_levels} "
+                f"levels; the current table has {len(st.session_state.hil.table)}. "
+                f"The same x means a different configuration across tables. "
+                f"Refusing to resume — use Fresh Start, or restore the CSV "
+                f"this session was run with."
+            )
+            return False, False
+
         try:
             hil = st.session_state.hil
-            hil.x = np.array(ckpt['x'])
-            hil.x_opt = np.array(ckpt['x_opt']) if ckpt['x_opt'] else np.array([])
+            hil.x = np.array(ckpt['x']).reshape(-1, 1)
+            hil.x_opt = (np.array(ckpt['x_opt']).reshape(-1, 1)
+                         if ckpt['x_opt'] else np.array([]))
             hil.y_opt = np.array(ckpt['y_opt']) if ckpt['y_opt'] else np.array([])
             hil.n = ckpt['n']
             st.session_state.results = ckpt['results']
@@ -347,7 +388,7 @@ def initialize_system(fresh_start: bool = False) -> Tuple[bool, bool]:
                     f"|SI - {float(ckpt_target):+.1f}|")
             resumed = True
         except Exception as e:
-            st.warning(f"⚠️ Checkpoint found but could not load ({e}). Starting fresh.")
+            st.warning(f"Checkpoint found but could not load ({e}). Starting fresh.")
             ckpt = None
 
     if ckpt is None:
@@ -383,18 +424,17 @@ def baseline_file_exists(run_num: int) -> bool:
 
 
 def analyze_baseline(run_num: int) -> Optional[float]:
-    """Analyze a no-band baseline trial; return its signed SI (no penalty).
+    """Analyze a no-band baseline trial; return its signed SI.
 
     Uses the SAME detection + symmetry pipeline as the optimization cost so
-    the baseline SI is directly comparable to the trial SIs. Spring params are
-    irrelevant for the baseline (band is slack), so we pass placeholder values
-    — the penalty is disabled (lambda_pf/mu_df = 0) and unused here anyway.
+    the baseline SI is directly comparable to the trial SIs. The exoskeleton
+    configuration is irrelevant here (band slack), and the cost function no
+    longer knows about the configuration at all.
     """
     fname = baseline_filename(run_num)
     fp = os.path.join(st.session_state.cost_extractor.trial_data_dir, fname)
     if not os.path.exists(fp):
         return None
-    st.session_state.cost_extractor.set_params(L0=0.0, attach=0.0)
     analysis = st.session_state.cost_extractor.analyze_trial(
         trial_num=run_num, filename=fname, verbose=False)
     if analysis is None:
@@ -468,32 +508,30 @@ def analyze_current_trial() -> bool:
                            trial_num)
 
     if not check_file_exists(trial_num):
-        st.error(f"❌ File not found: {fname}")
+        st.error(f"File not found: {fname}")
         return False
 
     hil = st.session_state.hil
-    params = hil.x[hil.n]
+    x_val = float(hil.x[hil.n, 0])
+    row = hil.table.row(x_val)
 
-    # NEW: params are (L0, attach), not (R, L0)
-    st.session_state.cost_extractor.set_params(L0=params[0], attach=params[1])
     cost = st.session_state.cost_extractor.extract_cost_from_file(
         trial_num=trial_num, filename=fname)
 
     if cost is None or np.isnan(cost):
-        st.error("❌ Cost extraction failed!")
+        st.error("Cost extraction failed.")
         return False
 
     if len(hil.x_opt) < 1:
-        hil.x_opt = np.array([params])
+        hil.x_opt = np.array([[x_val]])
         hil.y_opt = np.array([cost])
     else:
-        hil.x_opt = np.concatenate((hil.x_opt, np.array([params])))
-        hil.y_opt = np.concatenate((hil.y_opt, np.array([cost])))
+        hil.x_opt = np.concatenate((hil.x_opt, [[x_val]]))
+        hil.y_opt = np.concatenate((hil.y_opt, [cost]))
 
-    n_exploration = config['Optimization']['n_exploration']
     signed = _signed_mode(config)
     si_target = _si_target(config)
-    phase = ("Exploration (LHS)" if trial_num <= n_exploration
+    phase = ("Manual ramp" if trial_num <= hil.n_ramp
              else "Bayesian Optimization")
 
     # "is_best" is recomputed every trial against the configured target.
@@ -502,10 +540,18 @@ def analyze_current_trial() -> bool:
     for i, r in enumerate(st.session_state.results):
         r['is_best'] = (i == best_idx)
 
-    # NEW: Store L0 and attach instead of R and L0
+    # Store the index value AND the physical parameters it resolved to, so the
+    # results CSV is readable without the table in hand — and so the record
+    # survives a later regeneration of the table.
     st.session_state.results.append({
         'trial': trial_num,
-        'L0': params[0], 'attach': params[1],
+        'x': x_val,
+        'direction': row['direction'],
+        'R': row['R'], 'theta': row['theta'],
+        'L0': row['L0'], 'attach': row['attach'],
+        'stiff_Nm_per_rad': row['stiff_Nm_per_rad'],
+        'dose_Nm': row['dose_Nm'],
+        'engage_deg': row['engage_deg'],
         'cost': cost,
         'dist_from_target': _distance_from_target(cost, config),
         'phase': phase,
@@ -533,26 +579,21 @@ def analyze_current_trial() -> bool:
     hil.n += 1
 
     n_steps = config['Optimization']['n_steps']
-    if hil.n >= n_exploration and hil.n < n_steps:
+    if hil.n_ramp <= hil.n < n_steps:
         if config['Optimization']['normalize']:
-            norm_x = hil._normalize_x(hil.x_opt)
-            norm_y = hil._mean_normalize_y(hil.y_opt)
             raw = hil.BO.run(
-                norm_x.reshape(len(hil.x_opt), -1),
-                norm_y.reshape(len(hil.x_opt), 1))
-            raw = hil._denormalize_x(raw)
+                hil._normalize_x(hil.x_opt).reshape(len(hil.x_opt), -1),
+                hil._mean_normalize_y(hil.y_opt).reshape(len(hil.x_opt), 1))
+            raw = float(hil._denormalize_x(raw).ravel()[0])
         else:
-            if signed:
-                y_for_bo = -np.abs(hil.y_opt - si_target)
-            else:
-                y_for_bo = -hil.y_opt
+            y_for_bo = (-np.abs(hil.y_opt - si_target) if signed
+                        else -hil.y_opt)
             raw = hil.BO.run(
                 hil.x_opt.reshape(len(hil.x_opt), -1),
                 y_for_bo.reshape(len(hil.y_opt), 1))
-        new_parameter = hil._get_safe_bo_suggestion(raw)
-        hil.x = np.concatenate((
-            hil.x, new_parameter.reshape(1, config['Optimization']['n_parms'])
-        ), axis=0)
+            raw = float(np.asarray(raw).ravel()[0])
+        next_x = hil._next_x_from_table(raw)
+        hil.x = np.concatenate((hil.x, [[next_x]]), axis=0)
 
     st.session_state.current_trial += 1
     return True
@@ -562,152 +603,157 @@ def analyze_current_trial() -> bool:
 # Plots
 # ===========================================================================
 
-def plot_torque_curve(L0: float, attach: float) -> go.Figure:
-    """Plot torque curve for (L0, attach) with R fixed at 0.28m."""
-    angles, torques = compute_torque_curve(L0, attach_ratio=attach, angle_min=-30.0, angle_max=30.0)
-    opt = st.session_state.config['Optimization']
-    pf_zone = opt.get('pf_zone_deg', [2.0, 20.0])
-    df_check_angle = opt.get('df_check_angle_deg', -10.0)
+def plot_index_position(x_val: float) -> go.Figure:
+    """Show where this trial sits on the index, in dose and stiffness.
 
-    fig = go.Figure()
-    fig.add_vrect(x0=pf_zone[0], x1=pf_zone[1], fillcolor="red", opacity=0.1,
-                  layer="below", line_width=0,
-                  annotation_text=f"⚠️ PF Zone {pf_zone[0]}°–{pf_zone[1]}°",
-                  annotation_position="top left", annotation_font_size=11)
-    fig.add_vrect(x0=-30, x1=pf_zone[0], fillcolor="green", opacity=0.07,
-                  layer="below", line_width=0,
-                  annotation_text=f"✅ DF Zone (want peak @ {df_check_angle}°)",
-                  annotation_position="top right", annotation_font_size=11)
-    fig.add_trace(go.Scatter(x=angles, y=torques, mode='lines', name='Exo Torque',
-                             line=dict(color='royalblue', width=3)))
-    df_torque_at_peak = float(np.interp(df_check_angle, angles, torques))
-    fig.add_trace(go.Scatter(x=[df_check_angle], y=[df_torque_at_peak], mode='markers',
-                             name=f'Peak DF @ {df_check_angle}°: {df_torque_at_peak:.1f} Nm',
-                             marker=dict(color='green', size=12, symbol='star')))
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1)
-    fig.add_vline(x=0, line_dash="dot", line_color="black", line_width=1,
-                  annotation_text="Neutral", annotation_position="bottom right")
+    Replaces the old torque-curve plot. That plot recomputed torque from a
+    Python forward model that has since been deleted — it ran at a different
+    spring rate with R and theta hardcoded, so it drew curves for a device the
+    table does not build. The table already carries the validated numbers.
+
+    Dose is plotted above stiffness deliberately: stiffness is the sort key,
+    but dose is what the subject actually feels, and the two are not perfectly
+    monotone together.
+    """
+    hil = st.session_state.hil
+    df = hil.table.df
+    row = hil.table.row(x_val)
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        subplot_titles=("Dose (signed ROM peak torque) — what the subject feels",
+                        "Effective rotational stiffness — the sort key"),
+        vertical_spacing=0.12, row_heights=[0.5, 0.5])
+
+    fig.add_trace(go.Scatter(
+        x=df['x'], y=df['dose_signed_Nm'], mode='lines+markers',
+        name='dose', line=dict(color='#E8772E', width=2),
+        marker=dict(size=5)), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=[row['x']], y=[row['dose_Nm']], mode='markers',
+        name='this trial',
+        marker=dict(size=16, color='#7A3A0A', symbol='diamond',
+                    line=dict(color='white', width=2))), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=df['x'], y=df['stiff_Nm_per_rad'], mode='lines+markers',
+        name='stiffness', line=dict(color='royalblue', width=2),
+        marker=dict(size=5), showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=[row['x']], y=[row['stiff_Nm_per_rad']], mode='markers',
+        showlegend=False,
+        marker=dict(size=16, color='#7A3A0A', symbol='diamond',
+                    line=dict(color='white', width=2))), row=2, col=1)
+    fig.add_hline(y=COLLINS_NM_PER_RAD, line_dash="dash", line_color="red",
+                  annotation_text=f"Collins {COLLINS_NM_PER_RAD:.0f} Nm/rad",
+                  row=2, col=1)
+
+    for r in (1, 2):
+        fig.add_vline(x=0, line_dash="dot", line_color="black", row=r, col=1)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", row=r, col=1)
+
     fig.update_layout(
-        title=f"Torque-Angle Curve  |  R = {R_FIXED:.2f} m (fixed)  L₀ = {L0:.4f} m  attach = {attach:+.2f}",
-        xaxis_title="Ankle Angle (deg)  [DF ← 0 → PF]",
-        yaxis_title="Exo Torque (Nm)",
-        height=380, margin=dict(l=50, r=50, t=60, b=50),
-        showlegend=True, hovermode='x unified',
-        xaxis=dict(range=[-30, 30]),
-    )
+        title=(f"Index position: x = {row['x']:+.4f}  "
+               f"({_direction_label(row['direction'])})"),
+        height=520, margin=dict(l=50, r=40, t=70, b=50),
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=-0.18))
+    fig.update_xaxes(title_text="index x   [DF ← 0 → PF]", row=2, col=1)
+    fig.update_yaxes(title_text="dose (Nm)", row=1, col=1)
+    fig.update_yaxes(title_text="stiffness (Nm/rad)", row=2, col=1)
     return fig
 
 
 def plot_gp_surface():
-    """Plot GP surface for (L0, attach) space."""
+    """GP posterior over the 1-D index.
+
+    Was a pair of 3-D surfaces over (L0, attach). With one parameter this
+    becomes a mean line with a confidence band — easier to read, and it shows
+    which of the discrete levels the acquisition has actually spent trials on.
+    """
     import torch
     hil = st.session_state.hil
-    if hil.n < st.session_state.config['Optimization']['n_exploration'] + 1:
-        return None
-    if hil.BO.model is None:
-        return None
-
     config = st.session_state.config
-    range_ = np.array(list(config['Optimization']['range'])).reshape(2, 2)
-    L0_min, attach_min = range_[0]
-    L0_max, attach_max = range_[1]
-    n_grid = 40
-    L0_grid = np.linspace(L0_min, L0_max, n_grid)
-    attach_grid = np.linspace(attach_min, attach_max, n_grid)
-    LL, AA = np.meshgrid(L0_grid, attach_grid)
-    grid_pts = np.column_stack([LL.ravel(), AA.ravel()])
+    if hil.n < hil.n_ramp + 1 or hil.BO.model is None:
+        return None
+    if len(hil.y_opt) < 2:
+        return None
 
-    if config['Optimization']['normalize']:
-        grid_norm = (grid_pts - range_[0]) / (range_[1] - range_[0])
-    else:
-        grid_norm = grid_pts
+    x_grid = np.linspace(-1.0, 1.0, 400).reshape(-1, 1)
+    x_norm = (hil._normalize_x(x_grid)
+              if config['Optimization']['normalize'] else x_grid)
 
     hil.BO.model.eval()
     hil.BO.likelihood.eval()
     with torch.no_grad():
         pred = hil.BO.likelihood(hil.BO.model(
-            torch.tensor(grid_norm, dtype=torch.float64)))
+            torch.tensor(x_norm, dtype=torch.float64)))
         mean = pred.mean.cpu().numpy()
         std = pred.variance.sqrt().cpu().numpy()
 
+    # The GP is fit on negated, standardized y. Undo that so the axis reads in
+    # SI units rather than model-internal units.
     if config['Optimization']['normalize']:
-        y_obs_mean = np.mean(hil.y_opt)
-        y_obs_std = np.std(hil.y_opt) if np.std(hil.y_opt) > 0 else 1.0
-        mean_display = (-mean * y_obs_std) + y_obs_mean
+        y_mu = np.mean(hil.y_opt)
+        y_sd = np.std(hil.y_opt) if np.std(hil.y_opt) > 0 else 1.0
+        mean_disp = (-mean * y_sd) + y_mu
+        std_disp = std * y_sd
     else:
-        y_obs_std = 1.0
-        mean_display = -mean
+        mean_disp, std_disp = -mean, std
 
-    mean_display = mean_display.reshape(n_grid, n_grid)
-    std_display = (std * y_obs_std).reshape(n_grid, n_grid)
-    x_obs = hil.x_opt
-    y_obs = hil.y_opt
-    best_idx = _best_idx(y_obs, config)
+    xg = x_grid.ravel()
+    best_idx = _best_idx(hil.y_opt, config)
+    obs_x = hil.x_opt.ravel()
 
-    from plotly.subplots import make_subplots as _msp
-    fig = _msp(
-        rows=1, cols=2,
-        subplot_titles=("GP Mean — Predicted Cost", "GP Uncertainty (±1σ)"),
-        specs=[[{'type': 'surface'}, {'type': 'surface'}]],
-        horizontal_spacing=0.04)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([xg, xg[::-1]]),
+        y=np.concatenate([mean_disp + std_disp, (mean_disp - std_disp)[::-1]]),
+        fill='toself', fillcolor='rgba(232,119,46,0.18)',
+        line=dict(width=0), name='±1σ', hoverinfo='skip'))
+    fig.add_trace(go.Scatter(
+        x=xg, y=mean_disp, mode='lines', name='GP mean',
+        line=dict(color='#B5560F', width=3)))
 
-    # --- Panel 1: mean surface ---
-    fig.add_trace(go.Surface(
-        x=L0_grid, y=attach_grid, z=mean_display,
-        colorscale='RdYlGn_r', opacity=0.92,
-        colorbar=dict(title='Pred. Cost', x=0.44, len=0.8, thickness=12),
-        showscale=True), row=1, col=1)
+    # Tick every reachable level, so it stays obvious that x is discrete and
+    # unevenly spaced (DF steps are wider than PF steps).
+    fig.add_trace(go.Scatter(
+        x=hil.table.x_values,
+        y=np.full(len(hil.table), float(np.min(mean_disp - std_disp))),
+        mode='markers', name=f'available levels ({len(hil.table)})',
+        marker=dict(symbol='line-ns-open', size=9, color='#9B7B63')))
 
-    if len(x_obs) > 0:
-        mask = np.ones(len(x_obs), dtype=bool)
-        mask[best_idx] = False
-        if mask.any():
-            fig.add_trace(go.Scatter3d(
-                x=x_obs[mask, 0], y=x_obs[mask, 1], z=y_obs[mask],
-                mode='markers', name='Trials',
-                marker=dict(size=6, color='#3A2415',
-                            line=dict(color='white', width=1))),
-                row=1, col=1)
-        if _signed_mode(config):
-            best_label = (f"Best (SI={y_obs[best_idx]:+.2f}, "
-                          f"|Δ|={abs(y_obs[best_idx] - _si_target(config)):.2f})")
-        else:
-            best_label = f"Best ({y_obs[best_idx]:.2f})"
-        fig.add_trace(go.Scatter3d(
-            x=[x_obs[best_idx, 0]], y=[x_obs[best_idx, 1]],
-            z=[y_obs[best_idx]], mode='markers', name=best_label,
-            marker=dict(size=12, color='#E8772E', symbol='diamond',
-                        line=dict(color='#7A3A0A', width=2))),
-            row=1, col=1)
-
-    # --- Panel 2: uncertainty surface ---
-    fig.add_trace(go.Surface(
-        x=L0_grid, y=attach_grid, z=std_display,
-        colorscale='Oranges',
-        colorbar=dict(title='σ', x=1.0, len=0.8, thickness=12),
-        showscale=True), row=1, col=2)
-    if len(x_obs) > 0:
-        fig.add_trace(go.Scatter3d(
-            x=x_obs[:, 0], y=x_obs[:, 1], z=np.zeros(len(x_obs)),
-            mode='markers', showlegend=False,
-            marker=dict(size=5, color='#3A2415', opacity=0.7)),
-            row=1, col=2)
+    mask = np.ones(len(obs_x), dtype=bool)
+    mask[best_idx] = False
+    if mask.any():
+        fig.add_trace(go.Scatter(
+            x=obs_x[mask], y=hil.y_opt[mask], mode='markers', name='trials',
+            marker=dict(size=11, color='#3A2415',
+                        line=dict(color='white', width=1.5))))
+    if _signed_mode(config):
+        lbl = (f"Best (SI={hil.y_opt[best_idx]:+.2f}, "
+               f"|Δ|={abs(hil.y_opt[best_idx] - _si_target(config)):.2f})")
+    else:
+        lbl = f"Best ({hil.y_opt[best_idx]:.2f})"
+    fig.add_trace(go.Scatter(
+        x=[obs_x[best_idx]], y=[hil.y_opt[best_idx]], mode='markers', name=lbl,
+        marker=dict(size=17, color='#E8772E', symbol='diamond',
+                    line=dict(color='#7A3A0A', width=2))))
 
     if _signed_mode(config):
-        para_str = f"target SI = {_si_target(config):+.1f}%"
-    else:
-        para_str = "minimize |cost|"
-    cam = dict(eye=dict(x=1.5, y=-1.5, z=1.2))
+        fig.add_hline(y=_si_target(config), line_dash="dash", line_color="red",
+                      annotation_text=f"target {_si_target(config):+.1f}%")
+    fig.add_vline(x=0, line_dash="dot", line_color="black",
+                  annotation_text="zero torque")
+
     fig.update_layout(
-        title=(f'GP Cost Surface  |  L₀ [{L0_min}–{L0_max}]  '
-               f'attach [{attach_min:+.1f}–{attach_max:+.1f}]  |  {para_str}  |  R = {R_FIXED} m (fixed)'),
-        height=620, margin=dict(l=0, r=0, t=70, b=0), showlegend=True,
-        legend=dict(orientation='h', yanchor='bottom', y=-0.05),
-        scene=dict(xaxis_title='L₀ (m)', yaxis_title='attach',
-                   zaxis_title='Pred. Cost', camera=cam),
-        scene2=dict(xaxis_title='L₀ (m)', yaxis_title='attach',
-                    zaxis_title='σ', camera=cam),
-    )
+        title="GP posterior over the index",
+        xaxis_title="index x   [DF ← 0 → PF]",
+        yaxis_title="SI (%)" if _signed_mode(config) else "cost",
+        xaxis=dict(range=[-1.05, 1.05]),
+        height=540, hovermode='x unified',
+        margin=dict(l=60, r=40, t=60, b=80),
+        legend=dict(orientation='h', yanchor='bottom', y=-0.28))
     return fig
 
 
@@ -726,7 +772,7 @@ def plot_progress():
                             f"{'SI' if signed else 'Cost'} vs Trial  "
                             f"(target = {si_target:+.1f}%)" if signed
                             else "Cost vs Trial",
-                            'Parameters vs Trial'),
+                            'Index position vs Trial'),
                         vertical_spacing=0.15, row_heights=[0.6, 0.4])
     fig.add_trace(go.Scatter(
         x=df['trial'], y=df['cost'], mode='lines+markers',
@@ -755,15 +801,14 @@ def plot_progress():
                       annotation_text=f"Best: {df['cost'].min():.2f}",
                       row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=df['trial'], y=df['L0'], mode='lines+markers',
-                             name='L₀', marker=dict(size=8),
-                             line=dict(width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df['trial'], y=df['attach'], mode='lines+markers',
-                             name='attach', marker=dict(size=8),
-                             line=dict(width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['trial'], y=df['x'], mode='lines+markers',
+                             name='index x', marker=dict(size=9),
+                             line=dict(width=2, color='#E8772E')), row=2, col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
     fig.update_xaxes(title_text="Trial", row=2, col=1)
     fig.update_yaxes(title_text="SI (%)" if signed else "Cost", row=1, col=1)
-    fig.update_yaxes(title_text="Parameter Value", row=2, col=1)
+    fig.update_yaxes(title_text="index x  [DF ← 0 → PF]",
+                     range=[-1.05, 1.05], row=2, col=1)
     fig.update_layout(height=700, showlegend=True, hovermode='x unified')
     return fig
 
@@ -1215,8 +1260,7 @@ def sidebar_status():
         return
     config = st.session_state.config
     opt = config['Optimization']
-    range_ = np.array(list(opt['range'])).reshape(2, 2)
-    signed = _signed_mode(config)
+    hil = st.session_state.hil
     si_target = _si_target(config)
     baseline_si = st.session_state.baseline_si
 
@@ -1232,6 +1276,10 @@ def sidebar_status():
     base_line = ("n/a (Aim 2)" if _is_aim2(config)
                  else (f"{baseline_si:+.1f}%" if baseline_si is not None
                        else "pending"))
+
+    n_df = int(np.sum(hil.table.df['direction'] < 0))
+    n_pf = int(np.sum(hil.table.df['direction'] > 0))
+
     st.sidebar.markdown(f"""
     **Session**
     `{config['Subject']['id']} · {config['Subject']['session']}`
@@ -1240,10 +1288,10 @@ def sidebar_status():
     {para}
 
     **Baseline** {base_line}
-    **Trials** {opt['n_steps']} ({opt['n_exploration']} LHS)
-    **L₀** {range_[0,0]:.3f}–{range_[1,0]:.3f}  
-    **attach** {range_[0,1]:+.1f}–{range_[1,1]:+.1f}
-    **R (fixed)** {R_FIXED} m
+    **Trials** {opt['n_steps']} ({hil.n_ramp} ramp)
+    **Index** x ∈ [-1, +1]
+    {len(hil.table)} levels ({n_df} DF · 1 zero · {n_pf} PF)
+    `{Path(hil.table.path).name}`
     """)
 
 
@@ -1258,7 +1306,7 @@ def page_setup():
 
     # If already initialized, show status + re-init option.
     if st.session_state.initialized and st.session_state.config_saved:
-        st.success("✅ System initialized. Use **Run Experiment** in the nav.")
+        st.success("System initialized. Use **Run Experiment** in the nav.")
         sidebar_status()
         if st.button("🔄 Re-initialize / start a new session"):
             st.session_state.initialized = False
@@ -1275,15 +1323,13 @@ def page_setup():
             'Cost': {'aim': 'Aim 1', 'sample_rate': 200, 'time': 90,
                      'signed': True, 'si_target': -10.0, 'trim_seconds': 3.0},
             'Optimization': {
-                'n_parms': 2, 'n_steps': 15, 'n_exploration': 5,
-                'range': [[0.32, -0.2], [0.44, 1.0]],
+                'index_csv': 'config/index_unified.csv',
+                'n_parms': 1, 'n_steps': 15, 'manual_ramp_trials': 5,
+                'ramp_sequence': [0.0, 0.2, -0.2, 0.4, -0.4],
+                'range': [[-1.0], [1.0]],
                 'device': 'cpu', 'normalize': True, 'acquisition': 'ei',
                 'kernel_function': 'se', 'model_save_path': 'auto',
-                'result_save_path': 'auto',
-                'max_pf_torque_nm': 90.0, 'pf_check_angle_range': [0.0, 30.0],
-                'max_df_torque_nm': 10.0, 'df_check_angle_range': [-30.0, 0.0],
-                'slack_at_neutral_max_torque': 2.0, 'df_check_angle_deg': -10.0,
-                'lambda_pf': 0.01, 'mu_df': 0.005},
+                'result_save_path': 'auto'},
         }
     subj = _cfg.setdefault('Subject', {})
     cost = _cfg.setdefault('Cost', {})
@@ -1361,58 +1407,84 @@ def page_setup():
                 "Total trials", value=int(opt.get('n_steps', 15)),
                 min_value=1, max_value=100, step=1)
         with oc2:
-            opt['n_exploration'] = st.number_input(
-                "Exploration (LHS)", value=int(opt.get('n_exploration', 5)),
-                min_value=1, max_value=50, step=1)
+            opt['manual_ramp_trials'] = st.number_input(
+                "Manual ramp trials",
+                value=int(opt.get('manual_ramp_trials', 5)),
+                min_value=0, max_value=50, step=1,
+                help="Trials run from ramp_sequence before BO takes over.")
         with oc3:
             opt['normalize'] = st.checkbox(
                 "Normalize", value=bool(opt.get('normalize', True)))
 
-        st.markdown("**Parameter ranges (L₀, attach)** — R is FIXED at 0.28 m")
-        rng = np.array(opt.get('range', [[0.32, -0.2], [0.44, 1.0]]),
-                       dtype=float)
-        rc1, rc2, rc3, rc4 = st.columns(4)
-        with rc1:
-            l0_min = st.number_input("L₀ min (m)", value=float(rng[0, 0]),
-                                     step=0.01, format="%.4f")
-        with rc2:
-            l0_max = st.number_input("L₀ max (m)", value=float(rng[1, 0]),
-                                     step=0.01, format="%.4f")
-        with rc3:
-            attach_min = st.number_input("attach min", value=float(rng[0, 1]),
-                                         step=0.1, format="%+.2f")
-        with rc4:
-            attach_max = st.number_input("attach max", value=float(rng[1, 1]),
-                                         step=0.1, format="%+.2f")
-        opt['range'] = [[l0_min, attach_min], [l0_max, attach_max]]
+        st.markdown("**Search space — the index table.** Bounds, torque caps, "
+                    "and engagement filters live in `build_index_unified.m`. "
+                    "To change them, regenerate the CSV; they are deliberately "
+                    "not editable here, so the console and the table can never "
+                    "disagree about what is safe.")
 
-        with st.expander("⚙️ Advanced torque constraints"):
-            st.markdown("**Hard limits enforced every trial:**")
-            sc1, sc2, sc3 = st.columns(3)
-            with sc1:
-                opt['max_pf_torque_nm'] = st.number_input(
-                    "Max PF torque (Nm)",
-                    value=float(opt.get('max_pf_torque_nm', 90.0)), step=5.0)
-                opt['pf_check_angle_range'] = [
-                    st.number_input("PF zone min (deg)", value=0.0, step=1.0),
-                    st.number_input("PF zone max (deg)", value=30.0, step=1.0)
-                ]
-            with sc2:
-                opt['max_df_torque_nm'] = st.number_input(
-                    "Max DF torque (Nm)",
-                    value=float(opt.get('max_df_torque_nm', 10.0)), step=1.0)
-                opt['df_check_angle_range'] = [
-                    st.number_input("DF zone min (deg)", value=-30.0, step=1.0),
-                    st.number_input("DF zone max (deg)", value=0.0, step=1.0)
-                ]
-            with sc3:
-                opt['slack_at_neutral_max_torque'] = st.number_input(
-                    "Slack at 0° max (Nm)",
-                    value=float(opt.get('slack_at_neutral_max_torque', 2.0)),
-                    step=0.5)
-                opt['df_check_angle_deg'] = st.number_input(
-                    "DF check angle (deg)",
-                    value=float(opt.get('df_check_angle_deg', -10.0)), step=1.0)
+        opt['index_csv'] = st.text_input(
+            "Index table CSV",
+            value=str(opt.get('index_csv', 'config/index_unified.csv')))
+
+        # These are structural, not operator choices — one parameter, fixed range.
+        opt['n_parms'] = 1
+        opt['range'] = [[-1.0], [1.0]]
+
+        # Preview the table so a bad path or a stale CSV is obvious before
+        # initialization rather than at trial 1.
+        try:
+            from hitlo.index_unified import IndexTable
+            _tbl = IndexTable(opt['index_csv'])
+            _df = _tbl.df
+            _ndf = int(np.sum(_df['direction'] < 0))
+            _npf = int(np.sum(_df['direction'] > 0))
+            _pf_rad = _df.loc[_df['direction'] > 0, 'stiff_Nm_per_rad']
+            _df_rad = _df.loc[_df['direction'] < 0, 'stiff_Nm_per_rad'].abs()
+            st.success(
+                f"Loaded {len(_tbl)} levels — {_ndf} DF · 1 zero · {_npf} PF.  "
+                f"PF {_pf_rad.min():.0f}–{_pf_rad.max():.0f} Nm/rad,  "
+                f"DF {_df_rad.min():.0f}–{_df_rad.max():.0f} Nm/rad.")
+            if _pf_rad.max() >= COLLINS_NM_PER_RAD >= _pf_rad.min():
+                st.caption(f"PF arm brackets the Collins "
+                           f"{COLLINS_NM_PER_RAD:.0f} Nm/rad optimum.")
+            else:
+                st.warning(f"PF arm does NOT bracket Collins "
+                           f"{COLLINS_NM_PER_RAD:.0f} Nm/rad.")
+            _table_ok = True
+        except Exception as e:
+            st.error(f"Could not load index table: {e}")
+            _tbl = None
+            _table_ok = False
+
+        ramp_str = st.text_input(
+            "Ramp sequence (x values, comma-separated)",
+            value=", ".join(str(v) for v in
+                            opt.get('ramp_sequence', [0.0, 0.2, -0.2, 0.4, -0.4])),
+            help="Snapped to real table rows at load. Touch BOTH arms — if "
+                 "every ramp trial sits on one side, the GP starts blind on "
+                 "the other.")
+        try:
+            opt['ramp_sequence'] = [float(v.strip())
+                                    for v in ramp_str.split(',') if v.strip()]
+        except ValueError:
+            st.error("Ramp sequence must be comma-separated numbers.")
+
+        _ramp = opt.get('ramp_sequence', [])
+        if len(_ramp) != int(opt.get('manual_ramp_trials', 0)):
+            st.warning(
+                f"Ramp sequence has {len(_ramp)} values but "
+                f"manual_ramp_trials = {opt.get('manual_ramp_trials')}.")
+        if _ramp and _table_ok:
+            _snapped = [_tbl.snap(v) for v in _ramp]
+            _n_df_ramp = sum(1 for v in _snapped if v < 0)
+            _n_pf_ramp = sum(1 for v in _snapped if v > 0)
+            st.caption("Snaps to: " +
+                       ",  ".join(f"{v:+.4f}" for v in _snapped))
+            if _n_df_ramp == 0 or _n_pf_ramp == 0:
+                st.warning(
+                    f"Ramp covers only one arm ({_n_df_ramp} DF, "
+                    f"{_n_pf_ramp} PF). The GP will have no data on the other "
+                    f"side when BO starts.")
 
     st.markdown("---")
     bc1, bc2, bc3 = st.columns([1, 1, 1])
@@ -1420,7 +1492,7 @@ def page_setup():
         if st.button("💾 Save config", type="primary", width="stretch"):
             if save_config_to_disk(_cfg):
                 st.session_state.config_saved = True
-                st.success("✅ Saved.")
+                st.success("Saved.")
                 st.rerun()
     with bc2:
         if st.button("⏭️ Use existing config", width="stretch"):
@@ -1431,7 +1503,7 @@ def page_setup():
                      disabled=not st.session_state.config_saved):
             ok, _ = initialize_system(fresh_start=True)
             if ok:
-                st.success("✅ Initialized! Go to **Run Experiment**.")
+                st.success("Initialized. Go to **Run Experiment**.")
                 st.rerun()
 
     if not st.session_state.config_saved:
@@ -1439,6 +1511,10 @@ def page_setup():
 
     with st.expander("📄 Preview YAML"):
         st.code(yaml.safe_dump(_cfg, sort_keys=False), language="yaml")
+
+    if _table_ok:
+        with st.expander("📋 Index table"):
+            st.dataframe(_tbl.df, width="stretch", height=400)
 
 
 # ===========================================================================
@@ -1479,15 +1555,15 @@ def page_run():
             with col:
                 if inlet is not None:
                     update_live_data(inlet, store)
-                    st.success(f"✅ {side.capitalize()} · "
+                    st.success(f"{side.capitalize()} · "
                                f"{len(store['time'])} samples")
                     fig = plot_live_sensor(store, f'polar accel {side}', sr)
                     if fig:
                         st.plotly_chart(fig, width="stretch")
                     else:
-                        st.info(f"⏳ Collecting {side}…")
+                        st.info(f"Collecting {side}…")
                 else:
-                    st.warning(f"⚠️ {side.capitalize()} not found")
+                    st.warning(f"{side.capitalize()} not found")
                     if st.button(f"🔄 Reconnect {side}", key=f"rc_{side}"):
                         st.session_state[f'lsl_inlet_{side}'] = None
                         st.session_state[f'live_data_{side}'] = {
@@ -1562,9 +1638,9 @@ def _baseline_phase(config):
     with cb2:
         ready = baseline_file_exists(BASELINE_TRIAL_RUN)
         if ready:
-            st.success(f"✅ Found {base_fn}")
+            st.success(f"Found {base_fn}")
         else:
-            st.warning(f"⏳ Waiting for {base_fn}")
+            st.warning(f"Waiting for {base_fn}")
         if st.button("📊 Analyze baseline (run-002)", type="primary",
                      width="stretch", disabled=not ready):
             si = analyze_baseline(BASELINE_TRIAL_RUN)
@@ -1599,7 +1675,7 @@ def _optimization_phase(config, signed):
     hil = st.session_state.hil
     trial_num = st.session_state.current_trial + 1
     n_steps = config['Optimization']['n_steps']
-    n_exploration = config['Optimization']['n_exploration']
+    n_ramp = hil.n_ramp
     si_target = _si_target(config)
 
     if trial_num > n_steps:
@@ -1609,33 +1685,32 @@ def _optimization_phase(config, signed):
     section_chip(f"Step 3 · Trial {trial_num} of {n_steps}")
     c1, c2 = st.columns([2, 1])
     with c1:
-        if trial_num <= n_exploration:
-            st.subheader(f"🎲 Exploration {trial_num}/{n_exploration}")
+        if trial_num <= n_ramp:
+            st.subheader(f"📐 Manual ramp {trial_num}/{n_ramp}")
         else:
             st.subheader(f"🧠 Bayesian Optimization "
-                         f"{trial_num - n_exploration}/{n_steps - n_exploration}")
+                         f"{trial_num - n_ramp}/{n_steps - n_ramp}")
     with c2:
         st.progress((trial_num - 1) / n_steps,
                     text=f"{int((trial_num-1)/n_steps*100)}%")
 
     # Generate next BO suggestion if needed
     if hil.n >= len(hil.x):
-        if len(hil.x_opt) >= n_exploration:
+        if len(hil.x_opt) >= n_ramp:
             try:
                 if config['Optimization']['normalize']:
-                    nx = hil._normalize_x(hil.x_opt)
-                    ny = hil._mean_normalize_y(hil.y_opt)
-                    raw = hil.BO.run(nx.reshape(len(hil.x_opt), -1),
-                                     ny.reshape(len(hil.x_opt), 1))
-                    raw = hil._denormalize_x(raw)
+                    raw = hil.BO.run(
+                        hil._normalize_x(hil.x_opt).reshape(len(hil.x_opt), -1),
+                        hil._mean_normalize_y(hil.y_opt).reshape(len(hil.x_opt), 1))
+                    raw = float(hil._denormalize_x(raw).ravel()[0])
                 else:
                     yb = (-np.abs(hil.y_opt - si_target) if signed
                           else -hil.y_opt)
                     raw = hil.BO.run(hil.x_opt.reshape(len(hil.x_opt), -1),
                                      yb.reshape(len(hil.y_opt), -1))
-                newp = hil._get_safe_bo_suggestion(raw)
-                hil.x = np.concatenate((hil.x, newp.reshape(
-                    1, config['Optimization']['n_parms'])), axis=0)
+                    raw = float(np.asarray(raw).ravel()[0])
+                hil.x = np.concatenate(
+                    (hil.x, [[hil._next_x_from_table(raw)]]), axis=0)
             except Exception as e:
                 st.error(f"BO suggestion failed: {e}")
                 return
@@ -1643,21 +1718,45 @@ def _optimization_phase(config, signed):
             st.error("Parameter index out of bounds — reinitialize.")
             return
 
-    params = hil.x[hil.n]
+    x_val = float(hil.x[hil.n, 0])
+    row = hil.table.row(x_val)
+    direction = _direction_label(row['direction'])
 
-    # NEW: Show L0 and attach (not R and L0)
-    mc1, mc2 = st.columns(2)
-    mc1.metric("L₀ (m)", f"{params[0]:.4f}")
-    mc2.metric("Attach", f"{params[1]:+.2f}")
+    st.markdown(f"### Set on device — index x = {x_val:+.4f}  ({direction})")
 
-    # NEW: R is fixed at 0.28m
-    st.plotly_chart(plot_torque_curve(L0=params[0], attach=params[1]),
-                    width="stretch")
+    if row['is_zero']:
+        st.warning(
+            "**ZERO TORQUE CONDITION.** This is NOT device-off: the 24 bands "
+            "are always on, so the controller must actively cancel them "
+            "(τ_cable = 0 − τ_band(θ)).")
+    else:
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("R (m)", f"{row['R']:.4f}")
+        p2.metric("θ (deg)", f"{row['theta']:.2f}")
+        p3.metric("L₀ (m)", f"{row['L0']:.4f}")
+        p4.metric("attach", f"{row['attach']:+.4f}")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Stiffness", f"{row['stiff_Nm_per_rad']:+.1f} Nm/rad")
+        d2.metric("Dose in ROM", f"{row['dose_Nm']:+.2f} Nm")
+        d3.metric("Engages at", f"{row['engage_deg']:+.1f}°")
+
+    st.plotly_chart(plot_index_position(x_val), width="stretch")
 
     with st.expander("📝 LabRecorder steps", expanded=True):
+        if row['is_zero']:
+            setup_line = ("Set the controller to cancel the bands "
+                          "(τ_cable = 0 − τ_band(θ)). Do not simply remove them.")
+        else:
+            setup_line = (
+                f"Set **R = {row['R']:.4f} m**, **θ = {row['theta']:.2f}°**, "
+                f"**L₀ = {row['L0']:.4f} m**, **attach = {row['attach']:+.4f}** "
+                f"on Computer 2.")
+            if row['direction'] < 0:
+                setup_line += (" DF condition — the controller renders this as "
+                               "τ_cable = τ_desired − τ_band(θ), since the "
+                               "bands are always on.")
         st.markdown(f"""
-        1. Enter **L₀ = {params[0]:.4f}** and **attach = {params[1]:+.2f}** into Computer 2.
-           (R is fixed at {R_FIXED} m)
+        1. {setup_line}
         2. LabRecorder: Block/Task = `Default`, Run = `{trial_num}` →
            `sub-{config['Subject']['id']}_ses-{config['Subject']['session']}_task-Default_run-{trial_num:03d}_eeg.xdf`
         3. Walk {config['Cost']['time']} s · Stop · Analyze below.
@@ -1667,9 +1766,9 @@ def _optimization_phase(config, signed):
     with a1:
         ok = check_file_exists(trial_num)
         if ok:
-            st.success(f"✅ run-{trial_num:03d}.xdf")
+            st.success(f"run-{trial_num:03d}.xdf")
         else:
-            st.warning(f"⏳ run-{trial_num:03d}.xdf")
+            st.warning(f"Waiting for run-{trial_num:03d}.xdf")
     with a2:
         if st.button("🔍 Check file", width="stretch"):
             st.rerun()
@@ -1698,7 +1797,7 @@ def _optimization_phase(config, signed):
                 for w in hs_warn:
                     st.error(w) if "🚨" in w else st.warning(w)
                 if not hs_warn:
-                    st.success("✅ QC clean.")
+                    st.success("QC clean.")
                 if hs_fig is not None:
                     st.plotly_chart(hs_fig, width="stretch")
 
@@ -1723,11 +1822,9 @@ def page_gp_viewer():
                        "to **Load past session**.")
             return
         hil = st.session_state.hil
-        n_exp = st.session_state.config['Optimization']['n_exploration']
-        if hil.n < n_exp + 1 or hil.BO.model is None:
-            st.info(f"Live GP appears after exploration "
-                    f"({n_exp} trials) + 1 BO trial. "
-                    f"Currently {hil.n} trials done.")
+        if hil.n < hil.n_ramp + 1 or hil.BO.model is None:
+            st.info(f"Live GP appears after the ramp ({hil.n_ramp} trials) "
+                    f"+ 1 BO trial. Currently {hil.n} trials done.")
             return
         fig = plot_gp_surface()
         if fig:
@@ -1736,8 +1833,8 @@ def page_gp_viewer():
             st.markdown("---")
             section_chip("Trial history")
             df = pd.DataFrame(st.session_state.results)
-            st.dataframe(df[['trial', 'L0', 'attach', 'cost', 'phase']],
-                         width="stretch")
+            st.dataframe(df[['trial', 'x', 'dose_Nm', 'stiff_Nm_per_rad',
+                             'cost', 'phase']], width="stretch")
         return
 
     # ---- Load past session ----
@@ -1748,7 +1845,7 @@ def page_gp_viewer():
     with c1:
         base_dir = st.text_input("Base dir", value=base_default)
     with c2:
-        subject = st.text_input("Subject", value="P048")
+        subject = st.text_input("Subject", value="P062")
     with c3:
         session = st.text_input("Session", value="S001")
 
@@ -1756,7 +1853,15 @@ def page_gp_viewer():
 
 
 def _gp_historical_viewer(base_dir, subject, session):
-    """Load saved GP checkpoints from disk and scrub iterations."""
+    """Load saved GP checkpoints from disk and scrub iterations.
+
+    Handles BOTH parameterizations. Sessions run before August 2026 saved a 2-D
+    GP over (L0, attach); sessions from the unified index on save a 1-D GP over
+    x. The saved data.csv column count tells them apart — there is no flag in
+    the file, and old sessions cannot be re-rendered as 1-D, so both renderers
+    have to stay. Do not "simplify" this by deleting the 2-D branch: that is the
+    only way back into P048/P062-era models.
+    """
     import torch
     from botorch.models import SingleTaskGP
     from gpytorch.likelihoods import GaussianLikelihood
@@ -1782,13 +1887,7 @@ def _gp_historical_viewer(base_dir, subject, session):
         return
     iters = [int(f.name.split('_')[1]) for f in iter_folders]
 
-    cfg = load_config()
-    rng = (np.array(list(cfg['Optimization']['range'])).reshape(2, 2)
-           if cfg else np.array([[0.32, -0.2], [0.44, 1.0]]))
-    L0_MIN, attach_MIN = rng[0, 0], rng[0, 1]
-    L0_MAX, attach_MAX = rng[1, 0], rng[1, 1]
-
-    st.success(f"✅ {len(hil_results)} trials · {len(iters)} checkpoints "
+    st.success(f"{len(hil_results)} trials · {len(iters)} checkpoints "
                f"(iter {min(iters)}–{max(iters)})")
     sel = st.select_slider("Iteration", options=iters, value=iters[0])
 
@@ -1797,16 +1896,127 @@ def _gp_historical_viewer(base_dir, subject, session):
         data = np.loadtxt(ipath / 'data.csv')
         if data.ndim == 1:
             data = data.reshape(1, -1)
-        L0n, attachn, bo = data[:, 0], data[:, 1], data[:, 2]
-        L0p = L0n * (L0_MAX - L0_MIN) + L0_MIN
-        attachp = attachn * (attach_MAX - attach_MIN) + attach_MIN
-        actual = hil_results['cost'].values[:sel]
+    except Exception as e:
+        st.error(f"Could not load iteration {sel}: {e}")
+        return
 
-        L0g = np.linspace(L0_MIN, L0_MAX, 40)
-        attachg = np.linspace(attach_MIN, attach_MAX, 40)
-        LL, AA = np.meshgrid(L0g, attachg)
-        Xt = np.column_stack([((LL - L0_MIN)/(L0_MAX - L0_MIN)).ravel(),
-                              ((AA - attach_MIN)/(attach_MAX - attach_MIN)).ravel()])
+    n_parms = data.shape[1] - 1  # last column is the BO objective
+
+    if n_parms == 1:
+        st.caption("1-D session (unified index).")
+        _hist_1d(data, hil_results, ipath, sel, torch, SingleTaskGP,
+                 GaussianLikelihood)
+    elif n_parms == 2:
+        st.caption("2-D session — legacy (L₀, attach) parameterization. "
+                   "Predates the unified index.")
+        _hist_2d(data, hil_results, ipath, sel, torch, SingleTaskGP,
+                 GaussianLikelihood)
+    else:
+        st.error(f"Unrecognized checkpoint shape: {data.shape[1]} columns.")
+
+
+def _hist_1d(data, hil_results, ipath, sel, torch, SingleTaskGP,
+             GaussianLikelihood):
+    """Render a saved 1-D GP over the unified index."""
+    xn, bo = data[:, 0], data[:, 1]
+    xp = xn * 2.0 - 1.0                      # [0,1] -> [-1,+1]
+    actual = hil_results['cost'].values[:sel]
+
+    grid_n = np.linspace(0.0, 1.0, 400).reshape(-1, 1)
+    grid_p = grid_n.ravel() * 2.0 - 1.0
+    try:
+        Xtr = torch.tensor(xn.reshape(-1, 1), dtype=torch.float64)
+        ytr = torch.tensor(bo, dtype=torch.float64).reshape(-1, 1)
+        lik = GaussianLikelihood()
+        model = SingleTaskGP(Xtr, ytr, likelihood=lik)
+        model.load_state_dict(torch.load(ipath / 'model.pth'), strict=False)
+        model.eval()
+        with torch.no_grad():
+            pred = lik(model(torch.tensor(grid_n, dtype=torch.float64)))
+            mean = pred.mean.numpy()
+            lo, up = pred.confidence_region()
+            lo, up = lo.numpy(), up.numpy()
+    except Exception as e:
+        st.error(f"Could not rebuild GP for iteration {sel}: {e}")
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Iteration", sel)
+    m2.metric("Trials so far", len(xp))
+    m3.metric("|Best SI|", f"{np.abs(actual).min():.2f}%"
+              if len(actual) else "—")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([grid_p, grid_p[::-1]]),
+        y=np.concatenate([up, lo[::-1]]),
+        fill='toself', fillcolor='rgba(232,119,46,0.18)',
+        line=dict(width=0), name='confidence', hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=grid_p, y=mean, mode='lines', name='GP mean',
+                             line=dict(color='#B5560F', width=3)))
+    fig.add_trace(go.Scatter(
+        x=xp, y=bo, mode='markers+text',
+        marker=dict(size=10, color='#3A2415',
+                    line=dict(color='white', width=1.5)),
+        text=[str(i + 1) for i in range(len(xp))],
+        textposition='top center', textfont=dict(size=9), name='trials'))
+    fig.add_vline(x=0, line_dash='dot', line_color='black')
+    fig.update_layout(
+        height=520, hovermode='x unified',
+        xaxis_title='index x   [DF ← 0 → PF]',
+        yaxis_title='BO objective (model units)',
+        xaxis=dict(range=[-1.05, 1.05]),
+        margin=dict(l=60, r=40, t=40, b=60))
+    st.plotly_chart(fig, width="stretch")
+
+    with st.expander("📊 Trial data"):
+        n = min(len(xp), len(bo), len(actual))
+        if n == 0:
+            st.info("No overlapping trial data for this iteration.")
+        else:
+            st.dataframe(pd.DataFrame({
+                'Trial': range(1, n + 1),
+                'x': xp[:n],
+                'BO cost': bo[:n],
+                'signed SI %': actual[:n]}), width="stretch")
+
+
+def _hist_2d(data, hil_results, ipath, sel, torch, SingleTaskGP,
+             GaussianLikelihood):
+    """Render a saved 2-D GP from the legacy (L₀, attach) parameterization.
+
+    The ranges come from the results CSV rather than the live config, because
+    the live config now describes a 1-D space and would denormalize these
+    coordinates into nonsense.
+    """
+    L0n, attachn, bo = data[:, 0], data[:, 1], data[:, 2]
+    actual = hil_results['cost'].values[:sel]
+
+    if {'L0', 'attach'}.issubset(hil_results.columns):
+        L0_MIN = float(hil_results['L0'].min())
+        L0_MAX = float(hil_results['L0'].max())
+        attach_MIN = float(hil_results['attach'].min())
+        attach_MAX = float(hil_results['attach'].max())
+        if L0_MAX - L0_MIN < 1e-9 or attach_MAX - attach_MIN < 1e-9:
+            L0_MIN, L0_MAX = 0.30, 0.38
+            attach_MIN, attach_MAX = -0.25, 0.75
+            st.caption("Degenerate observed range — using v2.5.1 defaults.")
+        else:
+            st.caption("Axis ranges inferred from this session's results CSV.")
+    else:
+        L0_MIN, L0_MAX = 0.30, 0.38
+        attach_MIN, attach_MAX = -0.25, 0.75
+        st.caption("No L₀/attach columns in results — using v2.5.1 defaults.")
+
+    L0p = L0n * (L0_MAX - L0_MIN) + L0_MIN
+    attachp = attachn * (attach_MAX - attach_MIN) + attach_MIN
+
+    L0g = np.linspace(L0_MIN, L0_MAX, 40)
+    attachg = np.linspace(attach_MIN, attach_MAX, 40)
+    LL, AA = np.meshgrid(L0g, attachg)
+    Xt = np.column_stack([((LL - L0_MIN) / (L0_MAX - L0_MIN)).ravel(),
+                          ((AA - attach_MIN) / (attach_MAX - attach_MIN)).ravel()])
+    try:
         Xtr = torch.tensor(np.column_stack([L0n, attachn]), dtype=torch.float64)
         ytr = torch.tensor(bo, dtype=torch.float64).reshape(-1, 1)
         lik = GaussianLikelihood()
@@ -1819,7 +2029,7 @@ def _gp_historical_viewer(base_dir, subject, session):
             lo, up = pred.confidence_region()
             unc = (up.numpy() - lo.numpy()).reshape(LL.shape)
     except Exception as e:
-        st.error(f"Could not load iteration {sel}: {e}")
+        st.error(f"Could not rebuild GP for iteration {sel}: {e}")
         return
 
     m1, m2, m3 = st.columns(3)
@@ -1839,7 +2049,7 @@ def _gp_historical_viewer(base_dir, subject, session):
     fig.add_trace(go.Scatter3d(
         x=L0p[:_ns], y=attachp[:_ns], z=bo[:_ns], mode='markers+text',
         marker=dict(size=6, color='red', line=dict(color='black', width=1)),
-        text=[str(i+1) for i in range(_ns)],
+        text=[str(i + 1) for i in range(_ns)],
         textfont=dict(size=9, color='white'), name='trials'), row=1, col=1)
     fig.add_trace(go.Surface(x=L0g, y=attachg, z=unc, colorscale='Reds',
                   colorbar=dict(x=1.0, len=0.8, thickness=12)), row=1, col=2)
@@ -1886,7 +2096,8 @@ def page_results():
 
     best_idx = _best_idx(np.array([r['cost'] for r in st.session_state.results]),
                          config)
-    best_cost = st.session_state.results[best_idx]['cost']
+    best = st.session_state.results[best_idx]
+    best_cost = best['cost']
     latest = st.session_state.results[-1]['cost']
     done = len(st.session_state.results)
 
@@ -1901,37 +2112,69 @@ def page_results():
         else:
             st.metric("Best cost", f"{best_cost:.3f}")
     with m3:
-        st.metric("Latest SI" if signed else "Latest", f"{latest:+.2f}%"
-                  if signed else f"{latest:.3f}")
+        st.metric("Latest SI" if signed else "Latest",
+                  f"{latest:+.2f}%" if signed else f"{latest:.3f}")
     with m4:
         if st.session_state.baseline_si is not None:
             st.metric("Baseline", f"{st.session_state.baseline_si:+.2f}%")
         else:
             st.metric("Baseline", "n/a")
 
+    # Which configuration actually won, in physical terms.
+    section_chip("Best configuration")
+    if best.get('direction', 0) == 0:
+        st.info(f"**x = {best['x']:+.4f} — ZERO TORQUE** was the best trial. "
+                f"The subject's symmetry was closest to target with the device "
+                f"cancelled.")
+    else:
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("index x", f"{best['x']:+.4f}")
+        b2.metric("R (m)", f"{best['R']:.4f}")
+        b3.metric("θ (deg)", f"{best['theta']:.2f}")
+        b4.metric("L₀ (m)", f"{best['L0']:.4f}")
+        b5.metric("attach", f"{best['attach']:+.4f}")
+        st.caption(f"{_direction_label(best['direction'])} · "
+                   f"{best['stiff_Nm_per_rad']:+.1f} Nm/rad · "
+                   f"dose {best['dose_Nm']:+.2f} Nm in ROM")
+
+    # Which arm the trials went to. Worth watching across subjects: if DF keeps
+    # winning, the single GP is under-resolving the arm that matters and the
+    # two-GP split becomes worth building.
+    xs = np.array([r['x'] for r in st.session_state.results])
+    n_df = int(np.sum(xs < 0))
+    n_pf = int(np.sum(xs > 0))
+    n_zero = int(np.sum(np.isclose(xs, 0.0)))
+    st.caption(f"Trials by arm: **{n_df} DF** · {n_zero} zero · **{n_pf} PF**")
+
     if (fig := plot_progress()):
         st.plotly_chart(fig, width="stretch")
 
-    if len(st.session_state.results) > config['Optimization']['n_exploration']:
-        section_chip("GP surface")
+    if len(st.session_state.results) > hil.n_ramp:
+        section_chip("GP posterior")
         if (gp := plot_gp_surface()):
             st.plotly_chart(gp, width="stretch")
 
     section_chip("Trial history")
     df = pd.DataFrame(st.session_state.results)
     disp = df.copy()
-    disp['L0'] = disp['L0'].map('{:.4f}'.format)
-    disp['attach'] = disp['attach'].map('{:+.2f}'.format)
+    disp['x'] = disp['x'].map('{:+.4f}'.format)
+    disp['dose_Nm'] = disp['dose_Nm'].map('{:+.2f}'.format)
+    disp['stiff_Nm_per_rad'] = disp['stiff_Nm_per_rad'].map('{:+.1f}'.format)
     disp['cost'] = disp['cost'].map(
         '{:+.4f}'.format if signed else '{:.4f}'.format)
     if 'dist_from_target' in disp.columns:
         disp['|Δ target|'] = disp['dist_from_target'].map('{:.4f}'.format)
     disp['best'] = disp['is_best'].map(lambda x: '⭐' if x else '')
-    cols = ['trial', 'L0', 'attach', 'cost']
+    cols = ['trial', 'x', 'stiff_Nm_per_rad', 'dose_Nm', 'cost']
     if '|Δ target|' in disp.columns and signed:
         cols.append('|Δ target|')
     cols += ['phase', 'best']
     st.dataframe(disp[cols], width="stretch", height=360)
+
+    with st.expander("🔧 Physical parameters per trial"):
+        phys = df[['trial', 'x', 'R', 'theta', 'L0', 'attach',
+                   'engage_deg']].copy()
+        st.dataframe(phys, width="stretch")
 
     csv = df.to_csv(index=False)
     st.download_button("💾 Download results CSV", data=csv,
