@@ -50,7 +50,7 @@ from hitlo.io import load_both_polar_streams
 # ===========================================================================
 
 DEFAULT_XDF_FILE = (
-    '/Users/maccamardo/HITLO/sub-P048/ses-S001/eeg/'
+    '/Users/maccamardo/HITLO_Data/sub-P062/ses-S001/eeg/'
     'sub-P048_ses-S001_task-Default_run-007_eeg.xdf'
 )
 
