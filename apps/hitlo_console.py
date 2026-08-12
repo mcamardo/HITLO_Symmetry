@@ -47,7 +47,7 @@ subject's own baseline, not a fixed absolute SI. The baseline phase:
   1. Pre run-001 = no-device familiarization trial — IGNORED (not analyzed).
   2. Pre run-002 = THE baseline trial (band slack / no perturbation).
      Its signed SI alone defines baseline_si (no averaging).
-  3. 3. Target is set to:  si_target = baseline_si + sign(baseline_si) × displacement
+  3. Target is set to:  si_target = baseline_si + sign(baseline_si) × displacement
      (amplifies the subject's existing asymmetry in its own direction; inside
       a ±1.5% deadband the sign isn't resolvable, so the device's default
       direction is used)
@@ -1643,7 +1643,7 @@ def _baseline_phase(config):
     st.info(
         f"**Pre run-{BASELINE_IGNORE_RUN:03d}** — familiarization, **ignored**. "
         f"**Pre run-{BASELINE_TRIAL_RUN:03d}** — THE baseline trial. "
-        f"Target = baseline − displacement.")
+        f"Target = baseline amplified by the displacement, in its own direction.")
 
     base_fn = baseline_filename(BASELINE_TRIAL_RUN)
     ignore_fn = baseline_filename(BASELINE_IGNORE_RUN)
