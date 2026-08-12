@@ -1,32 +1,80 @@
+# =============================================================================
+# HITLO_Symmetry — experiment configuration (EXAMPLE / TEMPLATE)
+#
+# Copy to exo_symmetry_config.yml and edit, or use the Setup page in the
+# console (streamlit run apps/hitlo_console.py), which writes this file for you.
+#
+# v3.0.0 — unified index parameterization.
+#
+# WHAT IS NOT IN THIS FILE, AND WHY
+# Torque caps, engagement filters, and the parameter bounds are NOT here. They
+# live in build_index_unified.m, which sweeps the four physical parameters,
+# filters for safety and torque shape, and writes index_unified.csv. Every
+# configuration BO can reach is a row of that file and was validated at build
+# time.
+#
+# That means: to change a safety limit or widen the search space, edit the
+# MATLAB builder and regenerate the CSV. Do not add limits back here. Two
+# places holding the same limit is how they end up disagreeing — the previous
+# version had a PF cap of 60 in this file while the code enforced 90.
+# =============================================================================
+
 Subject:
-  id: P062
+  id: P001
   session: S001
+  # Root of the BIDS-ish data tree. Trials are read from and written to
+  # <base_dir>/sub-<id>/ses-<session>/eeg/
   base_dir: /Users/maccamardo/HITLO_Data
 
 Cost:
+  # Aim 1 = neurotypical, induce a target asymmetry relative to the subject's
+  #         own baseline (a baseline phase runs first and overrides si_target).
+  # Aim 2 = stroke, drive toward symmetry (si_target fixed at 0, no baseline).
   aim: Aim 1
-  sample_rate: 200
-  time: 90
+
+  sample_rate: 200        # Hz, Polar H10 accelerometer
+  time: 90                # trial duration in seconds
+
+  # signed=true requires TWO shank sensors. With one sternum sensor the sign
+  # of the symmetry index is unreliable, so a nonzero si_target is meaningless.
   signed: true
+
+  # Target symmetry index in percent. For Aim 1 this is only a fallback: the
+  # baseline phase computes si_target = baseline_si - displacement and
+  # overwrites it. For Aim 2 it is forced to 0.
   si_target: -3.0
+
+  # Seconds trimmed from each end of a trial before analysis, to keep the
+  # measurement in steady-state walking.
   trim_seconds: 3.0
 
 Optimization:
-  # The search space is now the index table, not a box of bounds.
-  # Every reachable configuration is a row of this file, pre-validated by
-  # build_index_unified.m. Regenerate the CSV to change caps or filters.
+  # ---------------------------------------------------------------------
+  # The search space. BO optimizes ONE number, x in [-1, +1]:
+  #     x = -1   max dorsiflexor stiffness (limited by the 24-band ceiling)
+  #     x =  0   zero torque
+  #     x = +1   max plantarflexor stiffness (limited by the torque cap)
+  # Each x resolves through this CSV into (R, theta, L0, attachment_ratio),
+  # the four values the operator sets on the device.
+  #
+  # x is NOT uniformly spaced: the two arms get different level counts, so DF
+  # steps are wider than PF steps. Code matches on nearest value in the x
+  # column and never computes a position arithmetically.
+  # ---------------------------------------------------------------------
   index_csv: config/index_unified.csv
 
+  # Structural, not really tunable. One parameter, fixed range.
   n_parms: 1
   range:
   - - -1.0
   - - 1.0
 
-  n_steps: 15
-  manual_ramp_trials: 5
+  n_steps: 15             # total trials, including the ramp
+  manual_ramp_trials: 5   # trials 1-N come from ramp_sequence; BO runs after
 
-  # x values, snapped to real rows at load. Two DF, zero, two PF: the ramp
-  # has to touch both arms or the GP starts blind on one side.
+  # Ramp x values, snapped to real table rows at load. Touch BOTH arms — if
+  # every ramp trial sits on one side, the GP has no data on the other when BO
+  # takes over, and with ~10 BO trials it may never go look.
   ramp_sequence:
   - 0.0
   - 0.2
@@ -35,9 +83,12 @@ Optimization:
   - -0.4
 
   device: cpu
-  normalize: true
+  normalize: true         # map x to [0,1] for GP numerical stability
   acquisition: ei
   kernel_function: se
+
+  # 'auto' means the console fills these in under
+  # <base_dir>/sub-<id>/ses-<session>/derivatives/hil_optimization/
   model_save_path: auto
   result_save_path: auto
 
@@ -47,5 +98,11 @@ Parameters:
     unit: dimensionless
     description: >
       -1 = max dorsiflexor stiffness, 0 = zero torque, +1 = max plantarflexor.
-      Maps to (R, theta, L0, attachment_ratio) via index_unified.csv.
-      x = 0 is not device-off: the bands are always on and must be cancelled.
+      Ordered on effective rotational stiffness (dtau/dtheta over the traversed
+      ROM), which anchors the search space to Collins/Wiggin/Sawicki 2015
+      (~180 Nm/rad). Maps to (R, theta, L0, attachment_ratio) via index_csv.
+
+      x = 0 is NOT device-off. The 24 rubber bands are always on, so the
+      controller must actively cancel them: tau_cable = 0 - tau_band(theta).
+      On the DF arm generally, the controller renders the target curve as
+      tau_cable = tau_desired - tau_band(theta).
