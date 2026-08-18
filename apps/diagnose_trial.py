@@ -90,7 +90,9 @@ def parse_args() -> argparse.Namespace:
 def collect_warnings(left_result, right_result,
                      left_stream, right_stream,
                      left_times, right_times,
-                     trial_duration_s) -> list:
+                     trial_duration_s,
+                     right_step_times=(), left_step_times=(),
+                     si_signed=None) -> list:
     """Run optional sanity checks and return a list of warning strings."""
     w = []
 
@@ -124,6 +126,73 @@ def collect_warnings(left_result, right_result,
         ratio = max(n_l, n_r) / min(n_l, n_r)
         if ratio > 1.5:
             w.append(f"L/R post-trim count imbalance {n_l}:{n_r} (ratio {ratio:.2f}x)")
+
+    # ---------------------------------------------------------------------
+    # The checks above all passed on a trial whose symmetry index came out at
+    # +76% with a per-stride std of 88% -- a left strap had come loose, the
+    # sensor was recording its own wobble instead of the shank, and detection
+    # was picking noise. Counts and rates looked normal because the noise
+    # happened to yield a plausible NUMBER of events. What gives it away is the
+    # structure of the intervals and the physiologic implausibility of the
+    # result, so check those directly.
+    # ---------------------------------------------------------------------
+
+    # Signal amplitude per side. A properly coupled shank sensor sees sharp
+    # impacts; a loose one sees damped mush at a fraction of the amplitude.
+    try:
+        from hitlo.detection import compute_magnitude
+        sd = {}
+        for label, stream in (('LEFT', left_stream), ('RIGHT', right_stream)):
+            sd[label] = float(np.std(compute_magnitude(stream.accel)))
+        lo_lbl = min(sd, key=sd.get)
+        hi_lbl = max(sd, key=sd.get)
+        if sd[lo_lbl] > 0 and sd[hi_lbl] / sd[lo_lbl] > 2.0:
+            w.append(
+                f"Signal amplitude mismatch: {lo_lbl} magnitude std "
+                f"{sd[lo_lbl]:.0f} vs {hi_lbl} {sd[hi_lbl]:.0f} "
+                f"({sd[hi_lbl] / sd[lo_lbl]:.1f}x). The weaker sensor is "
+                f"probably not coupled to the shank -- check that strap.")
+    except Exception:
+        pass
+
+    # Gaps in the heel-strike series = missed events. A missed strike destroys
+    # the L/R interleaving and makes the symmetry index meaningless.
+    for label, times in (('LEFT', left_times), ('RIGHT', right_times)):
+        t = np.asarray(times, dtype=float)
+        if len(t) < 4:
+            continue
+        iv = np.diff(t)
+        med = float(np.median(iv))
+        n_gap = int((iv > 1.8 * med).sum())
+        if n_gap:
+            w.append(
+                f"[{label}] {n_gap} gap(s) > 1.8x the median stride "
+                f"(median {med:.2f}s, longest {iv.max():.2f}s) -- heel strikes "
+                f"were missed, so step times are not trustworthy")
+
+    # Both legs must share a stride time in steady walking.
+    if len(left_times) >= 4 and len(right_times) >= 4:
+        ml = float(np.median(np.diff(np.asarray(left_times, dtype=float))))
+        mr = float(np.median(np.diff(np.asarray(right_times, dtype=float))))
+        if min(ml, mr) > 0 and max(ml, mr) / min(ml, mr) > 1.25:
+            w.append(
+                f"Stride time disagrees between legs (L={ml:.2f}s, R={mr:.2f}s). "
+                f"Both legs share one stride time when walking -- this means "
+                f"one side's detection is wrong, not that gait is asymmetric.")
+
+    # Step-time variability and implausible symmetry.
+    for label, steps in (('right', right_step_times), ('left', left_step_times)):
+        st = np.asarray(steps, dtype=float)
+        if len(st) >= 3 and st.mean() > 0:
+            cv = float(st.std() / st.mean())
+            if cv > 0.25:
+                w.append(f"[{label} steps] CV={cv:.2f} (>0.25) -- step times are "
+                         f"erratic; detection is likely dropping or inventing events")
+
+    if si_signed is not None and np.isfinite(si_signed) and abs(si_signed) > 40:
+        w.append(f"Symmetry index {si_signed:+.1f}% is outside anything steady "
+                 f"walking produces. Treat this trial as invalid, not as a "
+                 f"measurement of severe asymmetry.")
 
     return w
 
@@ -391,7 +460,10 @@ def main() -> int:
     # Warnings + report
     warnings = collect_warnings(left_result, right_result, left, right,
                                 left_times, right_times,
-                                trial_end - trial_start)
+                                trial_end - trial_start,
+                                right_step_times=right_steps,
+                                left_step_times=left_steps,
+                                si_signed=si_signed)
     print_report(left_result, right_result, left, right,
                  left_times, right_times, right_steps, left_steps,
                  si_signed, si_unsigned, per_stride,
