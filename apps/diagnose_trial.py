@@ -1,3 +1,4 @@
+#!/usr/bin/env python3.12
 """
 apps/diagnose_trial.py — standalone trial quality diagnostic.
 

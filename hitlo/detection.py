@@ -124,8 +124,32 @@ def compute_magnitude(accel_data: np.ndarray) -> np.ndarray:
     -------
     magnitude : ndarray, shape (N,)
     """
-    sig = np.asarray(accel_data).T
-    return np.sqrt(sig[0] ** 2 + sig[1] ** 2 + sig[2] ** 2)
+    # float64 BEFORE squaring, not after. The LSL outlet declares
+    # channel_format='int16', so pyxdf hands back an int16 array. Squaring a
+    # value like 4086 overflows int16, wraps negative, and sqrt of that is NaN
+    # — the whole recording then yields zero heel strikes with no error raised.
+    # Older files that happened to load as float32 hid this for months.
+    sig = np.asarray(accel_data, dtype=np.float64).T
+    if sig.shape[0] < 3:
+        raise ValueError(
+            f"compute_magnitude expects (N, 3) tri-axial data; "
+            f"got shape {np.asarray(accel_data).shape}.")
+    mag = np.sqrt(sig[0] ** 2 + sig[1] ** 2 + sig[2] ** 2)
+
+    # Fail loudly on non-finite magnitude. This is the tripwire for the int16
+    # overflow class of bug: a wrapped square yields sqrt(negative) = NaN, the
+    # NaN propagates through filtering and z-scoring, every threshold
+    # comparison returns False, and the pipeline reports "0 heel strikes" on a
+    # perfectly good recording. Silent zero is indistinguishable from a subject
+    # who never walked, so refuse to return it.
+    n_bad = int((~np.isfinite(mag)).sum())
+    if n_bad:
+        raise ValueError(
+            f"Acceleration magnitude has {n_bad}/{len(mag)} non-finite values. "
+            f"Input dtype was {np.asarray(accel_data).dtype}. This usually means "
+            f"integer overflow (squaring int16 accel wraps negative) or corrupt "
+            f"samples — NOT a gait problem. Load accel as float64.")
+    return mag
 
 
 # ===========================================================================
