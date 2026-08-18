@@ -24,8 +24,13 @@ from hitlo.detection import (DetectionConfig, compute_magnitude,
 from hitlo.symmetry import compute_symmetry_index
 from hitlo.index_unified import IndexTable
 
-REAL_XDF = Path("/Users/maccamardo/HITLO_Data/sub-P998/ses-S001/eeg/"
-                "sub-P998_ses-S001_task-Pre_run-002_eeg.xdf")
+# A HISTORICAL recording, deliberately not one from the current session.
+# This pointed at sub-P998 Pre_run-002 and broke the moment that filename was
+# re-recorded with a bad trial -- a regression fixture must not live in a
+# directory the experiment writes to.
+REAL_XDF = Path("/Users/maccamardo/HITLO_Data/sub-P062/ses-S001/eeg/"
+                "sub-P062_ses-S001_task-Pre_run-002_eeg.xdf")
+EXPECTED_SI = -15.46   # established value for this recording
 
 
 def _synthetic_gait(n=8000, fs=200.0, step_s=0.6, amp=3000.0):
@@ -135,9 +140,11 @@ def test_real_recording_end_to_end():
                      session="S001", signed=True, si_target=-3.0, trim_seconds=3.0)
     a = c.analyze_trial(trial_num=2, filename=REAL_XDF.name, verbose=False)
     assert a is not None, f"analysis returned None: {c.last_failure}"
-    assert len(a.left_heel_strikes) > 50, "implausibly few left heel strikes"
-    assert len(a.right_heel_strikes) > 50, "implausibly few right heel strikes"
-    assert -50 < a.symmetry_index < 50, f"SI out of range: {a.symmetry_index}"
+    assert len(a.left_heel_strikes) > 30, "implausibly few left heel strikes"
+    assert len(a.right_heel_strikes) > 30, "implausibly few right heel strikes"
+    assert abs(a.symmetry_index - EXPECTED_SI) < 0.5, (
+        f"SI drifted: {a.symmetry_index:+.2f}% vs expected {EXPECTED_SI:+.2f}% "
+        f"— a pipeline change altered the result on a fixed recording")
     return (f"L={len(a.left_heel_strikes)} R={len(a.right_heel_strikes)} "
             f"SI={a.symmetry_index:+.2f}%")
 
