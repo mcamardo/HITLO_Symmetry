@@ -132,6 +132,45 @@ class HIL_Exo:
             range=rng,
             model_save_path=opt["model_save_path"],
         )
+        self._constrain_kernel()
+
+    def _constrain_kernel(self) -> None:
+        """Bound the GP lengthscale to the scale of the search space.
+
+        HIL_toolkit builds SE(n_parms) with its default lengthscale constraint
+        of Interval(0, 10). Our x is normalized to [0, 1], so a lengthscale
+        anywhere near 10 makes every training point look identical to the
+        kernel: the covariance matrix collapses toward rank 1, Cholesky fails,
+        and BO dies with "Matrix not positive definite after repeatedly adding
+        jitter up to 1.0e-03". It is not caused by duplicate x -- a run with 10
+        distinct levels and a smallest gap of 0.033 still went singular.
+
+        A lengthscale below ~0.05 cannot resolve anything on a [0,1] axis, and
+        above ~1.0 spans the entire search space, so those bounds lose nothing
+        real. The noise floor matters for the same reason: real trial-to-trial
+        SI noise is percent-level, and pretending observations are near-exact
+        is what forces the kernel matrix to be inverted at full precision.
+
+        HIL_toolkit accepts a kernel_parms dict but does not use it (marked TODO
+        in its constructor), so the constraint is applied to the built kernel.
+        """
+        try:
+            from gpytorch.kernels import ScaleKernel, RBFKernel
+            from gpytorch.constraints import Interval, GreaterThan
+            covar = ScaleKernel(
+                RBFKernel(ard_num_dims=1,
+                          lengthscale_constraint=Interval(0.05, 1.0)),
+                outputscale_constraint=Interval(0.05, 10.0),
+            )
+            self.BO.kernel.covar_module = covar
+            self.BO.covar_module = covar
+            self._noise_floor = 1e-2
+            self.BO._noise_constraints = np.array([self._noise_floor, 10.0])
+            print(f"   GP kernel: lengthscale constrained to [0.05, 1.0], "
+                  f"noise floor {self._noise_floor}")
+        except Exception as e:
+            print(f"   WARNING: could not constrain GP kernel ({e}); "
+                  f"BO may fail with a non-positive-definite matrix")
 
     def _generate_initial_parameters(self) -> None:
         """Load the manual ramp. BO generates everything after it, on demand."""
