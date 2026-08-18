@@ -126,6 +126,12 @@ class SymmetryCost:
         self.si_target = si_target
         self.trim_seconds = trim_seconds
 
+        # Why the last analyze_trial returned None. Every failure path sets
+        # this, so a caller can tell "sensor stream missing" apart from
+        # "subject barely walked" instead of printing one generic message.
+        self.last_failure: Optional[str] = None
+        self.last_warnings: List[str] = []
+
         print("SymmetryCost v3.0.0 initialized (symmetry index only)")
         print(f"   Mode:              {'SIGNED' if signed else 'UNSIGNED (abs)'}")
         if signed:
@@ -140,6 +146,13 @@ class SymmetryCost:
               f"±{self.detection_cfg.stance_tolerance_pct * 100:.0f}% of baseline")
         if trim_seconds > 0:
             print(f"   Steady-state trim: {trim_seconds:.1f}s from each end")
+
+    def _fail(self, reason: str, verbose: bool) -> None:
+        """Record why analysis failed, print it, and return None."""
+        self.last_failure = reason
+        if verbose:
+            print(f"ANALYSIS FAILED: {reason}")
+        return None
 
     # ----- main entry points ---------------------------------------------
 
@@ -158,6 +171,10 @@ class SymmetryCost:
         analysis = self.analyze_trial(trial_num=trial_num, filename=filename)
         if analysis is None:
             return None
+        # Non-fatal problems (implausible strides, single-sensor fallback) are
+        # attached to the analysis and were previously dropped on the floor here,
+        # so the console never saw them. Keep them reachable.
+        self.last_warnings = list(analysis.warnings)
         return analysis.total_cost
 
     def analyze_trial(self,
@@ -166,6 +183,7 @@ class SymmetryCost:
                       verbose: bool = True,
                       ) -> Optional[TrialAnalysis]:
         """Full analysis of one trial; returns everything needed for QC + BO."""
+        self.last_failure = None
         if filename is None:
             filename = trial_filename(self.subject_id, self.session, trial_num)
         xdf_path = os.path.join(self.trial_data_dir, filename)
@@ -209,9 +227,12 @@ class SymmetryCost:
         right_times_raw = right_result.heel_strike_times
 
         if len(left_times_raw) < 3 or len(right_times_raw) < 3:
-            if verbose:
-                print("Not enough heel strikes detected.")
-            return None
+            return self._fail(
+                f"Too few heel strikes detected (left={len(left_times_raw)}, "
+                f"right={len(right_times_raw)}, need >=3 each). The recording "
+                f"loaded fine, so this is detection, not I/O: either the subject "
+                f"barely walked, or a sensor lost skin contact mid-trial.",
+                verbose)
 
         # --- Trim + plausibility filter ---
         trial_start = min(left.timestamps[0], right.timestamps[0])
@@ -225,9 +246,10 @@ class SymmetryCost:
                   f"Right {len(right_times_raw)}->{len(right_times)}")
 
         if len(left_times) < 3 or len(right_times) < 3:
-            if verbose:
-                print("Not enough peaks after trim.")
-            return None
+            return self._fail(
+                f"Too few heel strikes survived the +/-{self.trim_seconds}s trim "
+                f"(left={len(left_times)}, right={len(right_times)}). The trial "
+                f"is probably shorter than the trim window allows.", verbose)
 
         left_times, l_fast, l_slow = filter_implausible_strides(left_times)
         right_times, r_fast, r_slow = filter_implausible_strides(right_times)
@@ -243,9 +265,11 @@ class SymmetryCost:
         # --- Step times + symmetry ---
         right_steps, left_steps = compute_step_times(left_times, right_times)
         if len(right_steps) < 2 or len(left_steps) < 2:
-            if verbose:
-                print("Not enough step pairs.")
-            return None
+            return self._fail(
+                f"Heel strikes found but they do not interleave into steps "
+                f"(right_steps={len(right_steps)}, left_steps={len(left_steps)}). "
+                f"Usually means one sensor's strikes are all on one side of the "
+                f"other's in time -- check the two streams overlap.", verbose)
 
         n = min(len(right_steps), len(left_steps))
         right_steps = right_steps[:n]
@@ -296,27 +320,34 @@ class SymmetryCost:
         """
         stream = load_polar_stream(xdf_path, 'polar accel')
         if stream is None:
-            if verbose:
-                print("No polar accel stream found.")
-            return None
+            return self._fail(
+                "No usable accel stream in the file. Expected 'polar accel left' "
+                "and 'polar accel right'; neither those nor a single 'polar accel' "
+                "were present. Check what LabRecorder actually had checked.",
+                verbose)
 
         result = detect_heelstrikes_full(stream.accel, stream.timestamps,
                                          cfg=self.detection_cfg)
         if len(result.heel_strike_times) < 4:
-            return None
+            return self._fail(
+                f"Single-sensor mode: only {len(result.heel_strike_times)} heel "
+                f"strikes detected (need >=4).", verbose)
 
         hs = trim_peaks(result.heel_strike_times,
                         stream.timestamps[0], stream.timestamps[-1],
                         self.trim_seconds)
         if len(hs) < 4:
-            return None
+            return self._fail(
+                f"Single-sensor mode: only {len(hs)} heel strikes survived trim.",
+                verbose)
 
         intervals = np.diff(hs)
         right_steps = intervals[0::2]
         left_steps = intervals[1::2]
         n = min(len(right_steps), len(left_steps))
         if n < 2:
-            return None
+            return self._fail(
+                "Single-sensor mode: fewer than 2 complete stride pairs.", verbose)
         right_steps = right_steps[:n]
         left_steps = left_steps[:n]
 

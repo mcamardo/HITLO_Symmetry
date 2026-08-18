@@ -254,7 +254,12 @@ def connect_to_lsl() -> bool:
         return True
     try:
         from pylsl import StreamInlet, resolve_streams
-        streams = resolve_streams()
+        # 3s, not pylsl's 1s default. Multicast resolution on a shared lab
+        # network is lossy: with several other experiments streaming, a 1s
+        # window intermittently fails to hear outlets that are perfectly
+        # healthy, and the caller then reports SENSOR DISCONNECTED for sensors
+        # that never dropped a sample.
+        streams = resolve_streams(wait_time=3.0)
         for s in streams:
             if s.name() == 'polar accel left' and st.session_state.lsl_inlet_left is None:
                 st.session_state.lsl_inlet_left = StreamInlet(s)
@@ -552,8 +557,17 @@ def analyze_current_trial() -> bool:
         trial_num=trial_num, filename=fname)
 
     if cost is None or np.isnan(cost):
-        st.error("Cost extraction failed.")
+        reason = getattr(st.session_state.cost_extractor, 'last_failure', None)
+        st.error(f"Cost extraction failed: {reason}" if reason
+                 else "Cost extraction failed (no reason recorded).")
+        st.caption(f"File analyzed: {fname}")
         return False
+
+    # Non-fatal warnings used to be computed and then discarded here, so a trial
+    # that silently fell back to single-sensor mode looked identical to a clean
+    # one. Show them.
+    for w in getattr(st.session_state.cost_extractor, 'last_warnings', []) or []:
+        st.warning(w)
 
     if len(hil.x_opt) < 1:
         hil.x_opt = np.array([[x_val]])

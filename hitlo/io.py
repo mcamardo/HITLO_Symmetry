@@ -57,7 +57,9 @@ def load_polar_stream(xdf_path: str,
 
     for stream in data:
         if stream['info']['name'][0] == stream_name:
-            accel = np.asarray(stream['time_series'])
+            # float64 regardless of the stream's channel_format —
+            # int16 accel overflows as soon as anything squares it.
+            accel = np.asarray(stream['time_series'], dtype=np.float64)
             timestamps = np.asarray(stream['time_stamps'])
             if len(timestamps) < 2:
                 return None
