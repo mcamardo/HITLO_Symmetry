@@ -26,6 +26,7 @@ visualization layer on top.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -50,10 +51,30 @@ from hitlo.io import load_both_polar_streams
 # CLI arguments
 # ===========================================================================
 
-DEFAULT_XDF_FILE = (
-    '/Users/maccamardo/HITLO_Data/sub-P062/ses-S001/eeg/'
-    'sub-P048_ses-S001_task-Default_run-007_eeg.xdf'
-)
+def _latest_xdf_for_current_subject():
+    """Newest recording for whoever the config currently points at.
+
+    This used to be a hardcoded path — and a wrong one: a sub-P048 filename
+    inside the sub-P062 directory, which cannot exist. Running the tool with no
+    argument therefore always failed with a confusing "missing stream" error.
+    Resolve it from the live config instead, so bare `./apps/diagnose_trial.py`
+    means "look at what I just recorded".
+    """
+    try:
+        import yaml
+        cfg = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent /
+             'config' / 'exo_symmetry_config.yml').read_text())
+        eeg = (Path(cfg['Subject']['base_dir']) /
+               f"sub-{cfg['Subject']['id']}" /
+               f"ses-{cfg['Subject']['session']}" / 'eeg')
+        files = sorted(eeg.glob('*.xdf'), key=lambda f: f.stat().st_mtime)
+        return str(files[-1]) if files else None
+    except Exception:
+        return None
+
+
+DEFAULT_XDF_FILE = _latest_xdf_for_current_subject()
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument('xdf_file', nargs='?', default=DEFAULT_XDF_FILE,
-                   help='Path to XDF file')
+                   help='Path to XDF file (default: newest for the current subject)')
     p.add_argument('--trim', type=float, default=3.0,
                    help='Trim N seconds from each end (0 disables)')
     p.add_argument('--save-png', default='/tmp/symmetry_diagnose.png',
@@ -400,6 +421,14 @@ def print_report(left_result, right_result,
 
 def main() -> int:
     args = parse_args()
+    if not args.xdf_file:
+        print("No XDF given, and no recordings found for the subject in "
+              "config/exo_symmetry_config.yml.")
+        print("Pass a file explicitly:  ./apps/diagnose_trial.py <file.xdf>")
+        return 1
+    if not os.path.exists(args.xdf_file):
+        print(f"File not found: {args.xdf_file}")
+        return 1
 
     # Build detection config (apply CLI overrides on top of defaults)
     cfg_kwargs = {}
