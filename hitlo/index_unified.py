@@ -62,6 +62,23 @@ class IndexTable:
         self.df = self.df.sort_values("x").reset_index(drop=True)
         self._x = self.df["x"].to_numpy(dtype=float)
 
+        # u — normalized effective stiffness, the axis BO actually searches.
+        #
+        # x is a RANK: levels are evenly spaced in index position, not in
+        # physical effect. The two arms are wildly unequal — DF spans 16.5
+        # Nm/rad over 15 rows, PF spans 244 Nm/rad over 30 — so a third of the
+        # x axis points at 5.6% of the achievable torque. A GP told to search x
+        # spends a third of its effort on a region that can barely move the
+        # subject, which is exactly what happened in sub-P997: BO repeatedly
+        # proposed DF levels because that arm looked under-explored in x while
+        # being nearly exhausted in torque.
+        #
+        # u rescales the axis so equal steps mean equal steps in stiffness.
+        # Stiffness is validated strictly monotone below, so u is invertible,
+        # and it tracks delivered dose at r = 0.997.
+        st = self.df["stiff_Nm_per_rad"].to_numpy(dtype=float)
+        self._u = (st - st.min()) / (st.max() - st.min())
+
         self._validate()
 
     # ------------------------------------------------------------------
@@ -134,6 +151,23 @@ class IndexTable:
             "engage_deg": None if is_zero else float(r["engage_deg"]),
             "is_zero": is_zero,
         }
+
+    def u_of(self, x) -> np.ndarray:
+        """x -> u (normalized stiffness), snapping to the nearest real row."""
+        xa = np.asarray(x, dtype=float).ravel()
+        idx = np.argmin(np.abs(self._x[None, :] - xa[:, None]), axis=1)
+        return self._u[idx]
+
+    def x_of_u(self, u) -> np.ndarray:
+        """u -> x, snapping to the nearest real row. Inverse of u_of."""
+        ua = np.asarray(u, dtype=float).ravel()
+        idx = np.argmin(np.abs(self._u[None, :] - ua[:, None]), axis=1)
+        return self._x[idx]
+
+    @property
+    def u_values(self) -> np.ndarray:
+        """Every reachable level on the stiffness-uniform axis."""
+        return self._u.copy()
 
     @property
     def x_values(self) -> np.ndarray:

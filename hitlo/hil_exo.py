@@ -96,11 +96,21 @@ class HIL_Exo:
     # =======================================================================
 
     def _normalize_x(self, x: np.ndarray) -> np.ndarray:
-        return (np.asarray(x, dtype=float).reshape(-1, 1) + 1.0) / 2.0
+        """x (index rank) -> u (normalized stiffness), the GP's search axis.
 
-    def _denormalize_x(self, x: np.ndarray) -> np.ndarray:
-        return np.clip(np.asarray(x, dtype=float).reshape(-1, 1) * 2.0 - 1.0,
-                       -1.0, 1.0)
+        This used to be the linear map (x+1)/2, which handed the GP the rank
+        axis directly. Rank misrepresents the device: the DF arm is a third of
+        x but only 5.6% of the achievable torque, so a third of the GP's
+        attention went to levels that can barely perturb the subject. Searching
+        u instead makes equal distance mean equal stiffness, so each arm gets
+        attention in proportion to what it can actually deliver.
+        """
+        return self.table.u_of(x).reshape(-1, 1)
+
+    def _denormalize_x(self, u: np.ndarray) -> np.ndarray:
+        """u -> x, snapped to a real row (inverse of _normalize_x)."""
+        u = np.clip(np.asarray(u, dtype=float), 0.0, 1.0)
+        return self.table.x_of_u(u).reshape(-1, 1)
 
     def _mean_normalize_y(self, y: np.ndarray) -> np.ndarray:
         """Normalize y for GP input.
@@ -211,8 +221,11 @@ class HIL_Exo:
             from botorch.acquisition import qNoisyExpectedImprovement
             from botorch.sampling import IIDNormalSampler
 
+            # Evaluate the acquisition on the stiffness-uniform axis, so the
+            # GP's lengthscale means the same thing on both arms.
             cand = self.table.x_values.reshape(-1, 1)
-            cand_n = self._normalize_x(cand) if self.NORMALIZATION else cand
+            cand_n = (self.table.u_values.reshape(-1, 1)
+                      if self.NORMALIZATION else cand)
             train = (self._normalize_x(self.x_opt) if self.NORMALIZATION
                      else self.x_opt.reshape(-1, 1))
 
