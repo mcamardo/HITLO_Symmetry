@@ -67,6 +67,7 @@ Run with:
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -1581,8 +1582,10 @@ def page_run():
     signed = _signed_mode(config)
 
     # ---- Live sensors ----
-    section_chip("Sensors")
+    section_chip("Live monitor")
     st.subheader("📡 Live Polar H10 — Left + Right Shank")
+    st.caption("Monitoring only. Scanning, assignment and the leg check live on "
+               "the **Sensors** page.")
     connect_to_lsl()
 
     @st.fragment(run_every=5.0)
@@ -2237,6 +2240,227 @@ def page_results():
                        mime="text/csv", type="primary")
 
 
+
+# ===========================================================================
+# SENSORS PAGE — scan, assign, stream, and SEE which leg is which
+# ===========================================================================
+
+SENSORS_JSON = REPO_ROOT / 'config' / 'sensors.json'
+
+
+def _load_sensor_ids() -> dict:
+    if SENSORS_JSON.is_file():
+        try:
+            d = json.loads(SENSORS_JSON.read_text())
+            return {'left': str(d['left']).upper(), 'right': str(d['right']).upper()}
+        except Exception:
+            pass
+    return {'left': '', 'right': ''}
+
+
+def _save_sensor_ids(ids: dict) -> None:
+    SENSORS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    SENSORS_JSON.write_text(json.dumps(ids, indent=2) + "\n")
+
+
+def _scan_polar(timeout: float = 12.0) -> list:
+    """Shell out to collect_sensors --scan and parse the table it prints."""
+    import subprocess, re
+    r = subprocess.run([sys.executable, str(REPO_ROOT/'apps'/'collect_sensors.py'),
+                        '--scan', '--scan-timeout', str(timeout)],
+                       capture_output=True, text=True)
+    out = []
+    for line in r.stdout.splitlines():
+        m = re.match(r'\s*\d+\s+([0-9A-F]{8})\s+(-?\d+|\s*n/a)\s*dBm?\s+(.*)', line)
+        if m:
+            rssi = m.group(2).strip()
+            out.append({'id': m.group(1),
+                        'rssi': int(rssi) if rssi.lstrip('-').isdigit() else None,
+                        'name': m.group(3).strip()})
+    return out
+
+
+def _streamer_running(side: str) -> bool:
+    p = st.session_state.get(f'proc_{side}')
+    return p is not None and p.poll() is None
+
+
+def _start_streamer(side: str):
+    import subprocess
+    if _streamer_running(side):
+        return
+    env = {**os.environ, 'PYTHONUNBUFFERED': '1',
+           'LSLAPICFG': str(REPO_ROOT/'config'/'lsl_api.cfg')}
+    st.session_state[f'proc_{side}'] = subprocess.Popen(
+        [sys.executable, '-u', str(REPO_ROOT/'apps'/'collect_sensors.py'),
+         side, '--scan-timeout', '25'],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env=env, cwd=str(REPO_ROOT))
+
+
+def _stop_streamer(side: str):
+    p = st.session_state.get(f'proc_{side}')
+    if p is not None and p.poll() is None:
+        p.terminate()
+    st.session_state[f'proc_{side}'] = None
+
+
+def _motion_now(side: str, seconds: float = 0.6):
+    """Current motion on one stream: std of |a| over a short window."""
+    inlet = st.session_state.get(f'lsl_inlet_{side}')
+    if inlet is None:
+        return None
+    import time as _t
+    mags, t0 = [], _t.time()
+    while _t.time() - t0 < seconds:
+        chunk, _ = inlet.pull_chunk(timeout=0.05, max_samples=256)
+        for smp in chunk:
+            if len(smp) >= 3:
+                mags.append((smp[0]**2 + smp[1]**2 + smp[2]**2) ** 0.5)
+    if len(mags) < 5:
+        return None
+    return float(np.std(np.asarray(mags)))
+
+
+def page_sensors():
+    section_chip("Step 0 · Sensors")
+    st.header("🛰️ Sensors")
+    st.caption("Get both straps streaming, then confirm which LEG each one is on. "
+               "A device id names a strap, not the limb it ended up on.")
+
+    ids = _load_sensor_ids()
+
+    # ---- scan + assign ----
+    st.subheader("1 · Which straps are in range")
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("🔍 Scan (12 s)", width="stretch"):
+            with st.spinner("scanning for Polar H10 ..."):
+                st.session_state.scan_results = _scan_polar()
+    found = st.session_state.get('scan_results', [])
+    with c2:
+        if found:
+            df = pd.DataFrame(found)[['id', 'rssi', 'name']]
+            df.columns = ['Device ID', 'RSSI (dBm)', 'Name']
+            st.dataframe(df, hide_index=True, width="stretch")
+        else:
+            st.info("No scan yet. Straps must be **wet and worn** — the H10 sleeps "
+                    "until its electrodes are bridged by skin.")
+
+    # The lab has more straps than this experiment uses and they get swapped
+    # between rigs, so never assume the saved ids are the ones on the subject.
+    # Offer everything currently in range, plus whatever is saved, and say
+    # plainly when a saved id is not actually present.
+    in_range = [f['id'] for f in found]
+    opts = list(dict.fromkeys(in_range + [i for i in (ids['left'], ids['right']) if i]))
+    if found:
+        stale = [f"{sd}={ids[sd]}" for sd in ('left', 'right')
+                 if ids[sd] and ids[sd] not in in_range]
+        if stale:
+            st.warning(f"Saved but NOT in range: {', '.join(stale)}. "
+                       f"Either that strap is off a body, or a different one is "
+                       f"on the subject — pick from the scanned list below.")
+        extra = [i for i in in_range if i not in (ids['left'], ids['right'])]
+        if extra:
+            st.info(f"Also in range: {', '.join(extra)}. Other rigs in the lab "
+                    f"show up here too — check the printed id on the strap, and "
+                    f"use RSSI as a hint (the straps on your subject read "
+                    f"strongest).")
+    if opts:
+        a1, a2, a3 = st.columns([2, 2, 1])
+        li = opts.index(ids['left']) if ids['left'] in opts else 0
+        ri = opts.index(ids['right']) if ids['right'] in opts else (1 if len(opts) > 1 else 0)
+        rssi = {f['id']: f['rssi'] for f in found}
+        def _lbl(i):
+            r = rssi.get(i)
+            return f"{i}   ({r} dBm)" if r is not None else f"{i}   (not in range)"
+        with a1:
+            new_l = st.selectbox("LEFT shank", opts, index=li, format_func=_lbl)
+        with a2:
+            new_r = st.selectbox("RIGHT shank", opts, index=ri, format_func=_lbl)
+        with a3:
+            st.write("")
+            if st.button("💾 Save", width="stretch"):
+                if new_l == new_r:
+                    st.error("Left and right cannot be the same strap.")
+                else:
+                    _save_sensor_ids({'left': new_l, 'right': new_r})
+                    st.success("Saved. Restart the streams to apply.")
+                    st.rerun()
+    st.caption(f"Currently saved:  left = **{ids['left'] or '—'}**   "
+               f"right = **{ids['right'] or '—'}**")
+
+    st.markdown("---")
+
+    # ---- streams ----
+    st.subheader("2 · Streams")
+    connect_to_lsl()
+    s1, s2 = st.columns(2)
+    for col, side in ((s1, 'left'), (s2, 'right')):
+        with col:
+            live = st.session_state.get(f'lsl_inlet_{side}') is not None
+            run = _streamer_running(side)
+            st.markdown(f"**{side.upper()}**  ·  `{ids[side] or '—'}`")
+            if live:
+                st.success("streaming")
+            elif run:
+                st.warning("connecting ...")
+            else:
+                st.error("not running")
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("▶ Start", key=f"go_{side}", width="stretch",
+                             disabled=run):
+                    _start_streamer(side); time.sleep(2); st.rerun()
+            with b2:
+                if st.button("■ Stop", key=f"no_{side}", width="stretch",
+                             disabled=not run):
+                    _stop_streamer(side); st.rerun()
+
+    st.markdown("---")
+
+    # ---- live shake test ----
+    st.subheader("3 · Confirm which leg is which")
+    st.caption("Shake **one leg at a time** and watch which bar responds. If the "
+               "wrong bar moves, the straps are swapped.")
+    if st.button("🔄 Swap left ↔ right and restart streams"):
+        _save_sensor_ids({'left': ids['right'], 'right': ids['left']})
+        for sd in ('left', 'right'):
+            _stop_streamer(sd)
+        st.session_state.lsl_inlet_left = None
+        st.session_state.lsl_inlet_right = None
+        st.success("Swapped. Press Start on both streams again.")
+        st.rerun()
+
+    @st.fragment(run_every=0.8)
+    def _live_bars():
+        if (st.session_state.get('lsl_inlet_left') is None or
+                st.session_state.get('lsl_inlet_right') is None):
+            st.info("Both streams must be running for the live test.")
+            return
+        ml = _motion_now('left') or 0.0
+        mr = _motion_now('right') or 0.0
+        top = max(ml, mr, 1.0)
+        f1, f2 = st.columns(2)
+        for col, name, val in ((f1, 'LEFT', ml), (f2, 'RIGHT', mr)):
+            with col:
+                moving = val > 2.5 * min(ml, mr) and val > 60
+                st.markdown(f"**{name}** {'🟢 MOVING' if moving else ''}")
+                st.progress(min(val / top, 1.0))
+                st.caption(f"motion {val:.0f}")
+    _live_bars()
+
+    st.markdown("---")
+    st.subheader("4 · Preflight")
+    if st.button("🚦 Run preflight"):
+        import subprocess
+        r = subprocess.run([sys.executable, str(REPO_ROOT/'apps'/'preflight.py')],
+                           capture_output=True, text=True, cwd=str(REPO_ROOT))
+        (st.success if r.returncode == 0 else st.error)(
+            "READY" if r.returncode == 0 else "NOT READY")
+        st.code(r.stdout or r.stderr, language=None)
+
+
 # ===========================================================================
 # NAVIGATION ENTRY POINT
 # ===========================================================================
@@ -2246,6 +2470,7 @@ st.set_page_config(page_title="HITLO Symmetry Console",
 inject_theme()
 
 _pages = [
+    st.Page(page_sensors, title="Sensors", icon="🛰️"),
     st.Page(page_setup, title="Setup", icon="⚙️"),
     st.Page(page_run, title="Run Experiment", icon="🏃"),
     st.Page(page_gp_viewer, title="GP Viewer", icon="🧠"),
