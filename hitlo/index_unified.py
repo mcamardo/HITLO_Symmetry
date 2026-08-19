@@ -76,8 +76,15 @@ class IndexTable:
         # u rescales the axis so equal steps mean equal steps in stiffness.
         # Stiffness is validated strictly monotone below, so u is invertible,
         # and it tracks delivered dose at r = 0.997.
+        # SIGNED SQRT, not linear. Linear stiffness squeezes the DF arm into
+        # 5.6% of the axis — narrower than the GP's 0.05 lengthscale floor — so
+        # BO cannot resolve WITHIN dorsiflexion at all. Verified: with a
+        # synthetic optimum planted at DF max, linear-u BO never got closer
+        # than x=-0.53. Signed sqrt gives DF 13.6%: resolvable, while still far
+        # from the 31% of the rank axis that caused the over-exploration.
         st = self.df["stiff_Nm_per_rad"].to_numpy(dtype=float)
-        self._u = (st - st.min()) / (st.max() - st.min())
+        w = np.sign(st) * np.sqrt(np.abs(st))
+        self._u = (w - w.min()) / (w.max() - w.min())
 
         self._validate()
 
