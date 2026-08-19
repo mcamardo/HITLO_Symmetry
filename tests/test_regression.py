@@ -131,6 +131,52 @@ def test_acc_request_has_no_channel_field():
     return f"payload is {len(vals)} bytes, no channel field, response checked"
 
 
+def test_bo_axis_is_stiffness_not_rank():
+    """BO must search normalized stiffness, not index rank.
+
+    THE PROBLEM: x is a rank. The DF arm is 15 of 46 rows (33% of the x axis)
+    but spans only 16.5 of 260 Nm/rad (5.6% of the achievable torque). A GP
+    searching x therefore spent a third of its trials on an arm that had almost
+    nothing left to give — observed in sub-P997, where 6 of 15 trials went to
+    dorsiflexion and BO kept returning there.
+    """
+    table = IndexTable(str(REPO / 'config' / 'index_unified.csv'))
+    u = table.u_values
+    assert np.all(np.diff(u) > 0), "u must be strictly increasing to be invertible"
+    assert abs(u[0]) < 1e-12 and abs(u[-1] - 1.0) < 1e-12, "u must span [0, 1]"
+
+    x = table.x_values
+    assert np.allclose(table.x_of_u(table.u_of(x)), x), "u<->x round trip must be exact"
+
+    df_frac = float((table.df['direction'] < 0).mean())
+    df_span = float(u[table.df['direction'].to_numpy() < 0].max())
+    assert df_frac > 0.25, "sanity: DF really is a large share of the rank axis"
+    assert df_span < 0.10, (
+        f"DF spans {df_span:.3f} of the u axis; it should be small because the "
+        f"arm delivers little torque")
+    return (f"DF is {df_frac*100:.0f}% of rank axis but {df_span*100:.1f}% of "
+            f"stiffness axis")
+
+
+def test_ramp_spans_the_torque_range():
+    """The manual ramp must exercise the device's real range.
+
+    The original ramp (0, ±0.2, ±0.4) never applied more than 17.7 Nm of the
+    47.1 Nm available and covered 38% of the achievable dose range, so the GP
+    entered BO having never seen most of what the device can do.
+    """
+    import yaml
+    cfg = yaml.safe_load((REPO / 'config' / 'exo_symmetry_config.yml').read_text())
+    table = IndexTable(str(REPO / cfg['Optimization']['index_csv']))
+    doses = [table.row(float(v))['dose_Nm'] for v in cfg['Optimization']['ramp_sequence']]
+    full = table.df['dose_signed_Nm']
+    span = float(full.max() - full.min())
+    covered = (max(doses) - min(doses)) / span
+    assert covered > 0.90, f"ramp covers only {covered*100:.0f}% of the dose range"
+    assert min(doses) < 0 and max(doses) > 0, "ramp must touch both arms"
+    return f"ramp covers {covered*100:.0f}% of dose range, {min(doses):+.1f} to {max(doses):+.1f} Nm"
+
+
 def test_real_recording_end_to_end():
     """The actual file that failed today must now analyze cleanly."""
     if not REAL_XDF.is_file():
