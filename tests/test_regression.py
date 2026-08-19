@@ -151,11 +151,19 @@ def test_bo_axis_is_stiffness_not_rank():
     df_frac = float((table.df['direction'] < 0).mean())
     df_span = float(u[table.df['direction'].to_numpy() < 0].max())
     assert df_frac > 0.25, "sanity: DF really is a large share of the rank axis"
-    assert df_span < 0.10, (
-        f"DF spans {df_span:.3f} of the u axis; it should be small because the "
-        f"arm delivers little torque")
-    return (f"DF is {df_frac*100:.0f}% of rank axis but {df_span*100:.1f}% of "
-            f"stiffness axis")
+    # The window is deliberate and bounded on BOTH sides.
+    #  - Above ~0.31 (the rank axis) BO over-explores an arm that has little
+    #    torque left to give: 6 of 15 trials went to DF in sub-P997.
+    #  - Below ~0.10 the arm is narrower than the GP's 0.05 lengthscale floor
+    #    and BO cannot resolve WITHIN it. Verified with linear stiffness
+    #    (DF = 5.6%): a synthetic optimum at DF max was never found, BO
+    #    stalling at x=-0.53. Signed sqrt puts DF at ~0.14, where a planted
+    #    DF optimum IS found (x=-0.93) and a PF optimum still draws 0 DF trials.
+    assert 0.10 < df_span < 0.20, (
+        f"DF spans {df_span:.3f} of the u axis; outside [0.10, 0.20] it is "
+        f"either unresolvable or over-weighted")
+    return (f"DF is {df_frac*100:.0f}% of rank axis, {df_span*100:.1f}% of "
+            f"search axis (resolvable, not over-weighted)")
 
 
 def test_ramp_spans_the_torque_range():
