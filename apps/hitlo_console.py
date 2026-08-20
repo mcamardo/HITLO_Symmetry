@@ -2210,7 +2210,46 @@ def page_results():
     else:
         agree = abs(post['x'] - post['best_observed_x']) < 1e-9
         pr = post['row']
-        st.markdown("**Set these on the device for the 10-min phases:**")
+
+        # ---- the three validity checks, computed before anything is claimed --
+        spread = float(post['mu'].max() - post['mu'].min())
+        unc = float(np.mean(post['sd']))
+        t1_ratio = spread / max(unc, 1e-9)
+        t1 = t1_ratio > 2.0
+
+        rows_df = pd.DataFrame(st.session_state.results)
+        REPEAT_TOL = 0.10      # configs within 10% stiffness count as repeats
+        REPEAT_MAX = 5.0       # pts; above this, repeats do not reproduce
+        worst_repeat, n_groups = 0.0, 0
+        if 'stiff_Nm_per_rad' in rows_df and len(rows_df) > 2:
+            st_v = rows_df['stiff_Nm_per_rad'].to_numpy(float)
+            for i in range(len(st_v)):
+                near = np.abs(st_v - st_v[i]) <= REPEAT_TOL * max(abs(st_v[i]), 1.0)
+                if near.sum() >= 2:
+                    n_groups += 1
+                    sp = float(rows_df.loc[near, 'cost'].max()
+                               - rows_df.loc[near, 'cost'].min())
+                    worst_repeat = max(worst_repeat, sp)
+        t2 = n_groups > 0 and worst_repeat <= REPEAT_MAX
+
+        zero_rows = rows_df[rows_df.get('direction', pd.Series(dtype=int)) == 0]
+        t3 = None
+        gain = zero_gap = None
+        if len(zero_rows):
+            zero_gap = float(abs(zero_rows['cost'].iloc[0] - si_target))
+            gain = zero_gap - post['best_observed_distance']
+            t3 = gain > max(worst_repeat, REPEAT_MAX)
+
+        resolved = bool(t1 and t2 and (t3 is not False))
+
+        # ---- WHAT TO SET — first, unmissable ------------------------------
+        if resolved:
+            st.success("### ✅ Set the device to this for the 10-min phases")
+        else:
+            st.warning("### ⚠️ Set the device to this for the 10-min phases")
+            st.caption("This is the best available **estimate**, not a located "
+                       "optimum — see the checks below. You still carry it "
+                       "forward; you just do not report it as the optimum.")
         if pr['is_zero']:
             st.warning("ZERO TORQUE is the estimated optimum — the controller "
                        "must actively cancel the bands, this is not device-off.")
@@ -2249,18 +2288,57 @@ def page_results():
                 f"argmin, and report both — a gap this size is itself a statement "
                 f"about your noise level.")
 
-        # Is the surface actually resolved, or flat inside its own uncertainty?
-        spread = float(post['mu'].max() - post['mu'].min())
-        unc = float(np.mean(post['sd']))
         st.caption(f"predicted |SI − target| at this level: "
                    f"**{post['predicted_distance']:.2f} ± {post['predicted_sd']:.2f}** pts")
-        if spread < 2 * unc:
+
+        # ---- is this actually an optimum? ---------------------------------
+        st.markdown("---")
+        st.markdown("**Is this a located optimum, or the best guess?**")
+
+        def _row(ok, name, detail):
+            icon = "✅" if ok else ("❌" if ok is False else "➖")
+            st.markdown(f"{icon} **{name}** — {detail}")
+
+        _row(t1, "Posterior is resolved",
+             f"spread {spread:.3f} vs mean uncertainty {unc:.3f} "
+             f"(ratio {t1_ratio:.2f}, need > 2). "
+             + ("The GP distinguishes levels."
+                if t1 else "The curve is flat inside its own error — the model "
+                           "cannot tell levels apart."))
+        _row(t2, "Repeats reproduce",
+             (f"worst spread between configs within {REPEAT_TOL*100:.0f}% "
+              f"stiffness: {worst_repeat:.1f} pts (need < {REPEAT_MAX:.0f}). "
+              + ("Setting the device the same way gives the same answer."
+                 if t2 else "Setting the device the same way gives different "
+                            "answers, by more than the effect you are chasing."))
+             if n_groups else "no repeated configurations in this session")
+        if t3 is None:
+            _row(None, "Beats the no-torque control",
+                 "no zero-torque trial in this session")
+        else:
+            _row(t3, "Beats the no-torque control",
+                 f"improves on zero torque by {gain:.1f} pts "
+                 f"(zero missed by {zero_gap:.1f}, this level by "
+                 f"{post['best_observed_distance']:.1f}); needs to exceed the "
+                 f"{max(worst_repeat, REPEAT_MAX):.1f} pt repeat spread.")
+
+        if resolved:
+            st.success("**All checks pass** — reportable as a subject-specific optimum.")
+        else:
+            claim = ("You can report that the optimized condition improved "
+                     "symmetry tracking relative to the null condition."
+                     if t3 else "")
             st.error(
-                f"⚠️ **The posterior is flat relative to its own uncertainty** "
-                f"(spread {spread:.3f} vs mean SD {unc:.3f}). This level is not "
-                f"statistically distinguishable from many others. It is still the "
-                f"defensible choice to carry forward, but do not report it as a "
-                f"located optimum.")
+                "**Not a located optimum.** Carry the configuration above into "
+                "the training phases — you have to set something, and this is the "
+                "best estimate — but do not write that a subject-specific optimum "
+                "was identified. " + claim)
+            if n_groups and not t2:
+                st.caption("The repeat check is the gate, and it is a measurement "
+                           "problem rather than an algorithm one: longer trials, a "
+                           "settling window, and deliberate repeat trials shrink "
+                           "that spread. Under ~5 pts the posterior check usually "
+                           "passes on its own.")
 
         with st.expander("Why not just use the last BO suggestion?"):
             st.markdown(
