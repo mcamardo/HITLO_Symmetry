@@ -272,6 +272,71 @@ class HIL_Exo:
     # Reporting
     # =======================================================================
 
+    def posterior_best(self) -> Dict:
+        """The GP's estimate of the optimum, not the luckiest observation.
+
+        `_best_so_far_idx` returns argmin over OBSERVED trials, so it can only
+        ever name one of the levels actually walked, and selecting the minimum
+        of noisy draws systematically picks the point with the most favourable
+        error rather than the best underlying value. With sub-P997's repeat
+        pairs spanning 13-20 points against a per-trial SEM of 2-4, that bias
+        is large: a lucky ramp trial can outrank anything BO found.
+
+        The posterior mean pools information across neighbouring levels, so a
+        single lucky draw is shrunk toward what its neighbours support, and the
+        estimate can land on a level that was never tested.
+
+        Sign care: the GP is fitted on _mean_normalize_y output, which is
+        NEGATED so BoTorch maximizes. Best cost is therefore the posterior
+        ARGMAX, and predicted distance is recovered by undoing the negation and
+        the standardization.
+
+        CAVEAT, worth reporting alongside: a single GP spanning the ~15x PF/DF
+        stiffness asymmetry under-resolves the DF arm. If the optimum sits on
+        the DF side, this estimate is least trustworthy exactly where it
+        matters. Report `best_observed` too — if the two disagree sharply, that
+        disagreement is itself a statement about the noise level.
+
+        Returns None if the GP has not been fitted yet.
+        """
+        model = getattr(self.BO, "model", None)
+        if model is None or len(self.y_opt) < 2:
+            return None
+        try:
+            import torch
+        except ImportError:
+            return None
+
+        # The standardization actually applied to the training targets, so the
+        # posterior can be mapped back into percentage points.
+        d = np.abs(self.y_opt - self.si_target) if self.signed else self.y_opt
+        d_mean, d_std = float(np.mean(d)), float(np.std(d)) + 1e-8
+
+        cand_u = (self.table.u_values.reshape(-1, 1) if self.NORMALIZATION
+                  else self.table.x_values.reshape(-1, 1))
+        model.eval()
+        with torch.no_grad():
+            post = model.posterior(torch.tensor(cand_u, dtype=torch.float64))
+            mu = post.mean.squeeze(-1).cpu().numpy().ravel()
+            sd = post.variance.sqrt().squeeze(-1).cpu().numpy().ravel()
+
+        best = int(np.argmax(mu))          # negated targets -> argmax is best
+        x_best = float(self.table.x_values[best])
+        pred_dist = -float(mu[best]) * d_std + d_mean
+        obs_idx = self._best_so_far_idx()
+        return {
+            "x": x_best,
+            "row": self.table.row(x_best),
+            "predicted_distance": pred_dist,
+            "predicted_sd": float(sd[best]) * d_std,
+            "was_tested": bool(np.any(np.isclose(self.x_opt.ravel(), x_best))),
+            "best_observed_x": float(self.x_opt[obs_idx, 0]),
+            "best_observed_si": float(self.y_opt[obs_idx]),
+            "best_observed_distance": float(abs(self.y_opt[obs_idx] - self.si_target)),
+            "mu": mu, "sd": sd,
+            "x_grid": self.table.x_values.copy(),
+        }
+
     def _best_so_far_idx(self) -> int:
         if self.signed:
             return int(np.argmin(np.abs(self.y_opt - self.si_target)))
