@@ -2195,6 +2195,87 @@ def page_results():
                    f"{best['stiff_Nm_per_rad']:+.1f} Nm/rad · "
                    f"dose {best['dose_Nm']:+.2f} Nm in ROM")
 
+    # ------------------------------------------------------------------
+    # What to physically set for the post-optimization training phases.
+    # This is the number the operator actually needs: after the 15 trials the
+    # protocol runs 10 min assistive + 10 min EA at "the best result", and
+    # "best" has to mean something defensible.
+    # ------------------------------------------------------------------
+    section_chip("Carry into the training phase")
+    hil = st.session_state.get('hil')
+    post = hil.posterior_best() if hil is not None else None
+
+    if post is None:
+        st.info("GP not fitted yet — best observed trial is the only estimate.")
+    else:
+        agree = abs(post['x'] - post['best_observed_x']) < 1e-9
+        pr = post['row']
+        st.markdown("**Set these on the device for the 10-min phases:**")
+        if pr['is_zero']:
+            st.warning("ZERO TORQUE is the estimated optimum — the controller "
+                       "must actively cancel the bands, this is not device-off.")
+        else:
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("index x", f"{post['x']:+.4f}")
+            k2.metric("R (m)", f"{pr['R']:.4f}")
+            k3.metric("θ (deg)", f"{pr['theta']:.2f}")
+            k4.metric("L₀ (m)", f"{pr['L0']:.4f}")
+            k5.metric("attach", f"{pr['attach']:+.4f}")
+            st.caption(f"{_direction_label(pr['direction'])} · "
+                       f"{pr['stiff_Nm_per_rad']:+.1f} Nm/rad · "
+                       f"dose {pr['dose_Nm']:+.2f} Nm"
+                       + ("" if post['was_tested'] else
+                          " · this level was NEVER TESTED — the GP inferred it "
+                          "from neighbouring trials"))
+
+        c1, c2 = st.columns(2)
+        c1.metric("GP posterior argmin",
+                  f"{post['x']:+.4f}",
+                  help="The model's belief, pooling every trial. Standard "
+                       "estimator in HILBO work.")
+        c2.metric("Best observed trial",
+                  f"{post['best_observed_x']:+.4f}",
+                  f"SI {post['best_observed_si']:+.2f}%",
+                  help="argmin over trials actually walked. Biased low: taking "
+                       "the minimum of noisy draws selects the most favourable "
+                       "error, not the best underlying value.")
+
+        if agree:
+            st.success("Both estimators agree — carry this configuration forward.")
+        else:
+            st.warning(
+                f"**They disagree** (Δx = {abs(post['x']-post['best_observed_x']):.3f}). "
+                f"The GP does not believe the luckiest draw. Prefer the posterior "
+                f"argmin, and report both — a gap this size is itself a statement "
+                f"about your noise level.")
+
+        # Is the surface actually resolved, or flat inside its own uncertainty?
+        spread = float(post['mu'].max() - post['mu'].min())
+        unc = float(np.mean(post['sd']))
+        st.caption(f"predicted |SI − target| at this level: "
+                   f"**{post['predicted_distance']:.2f} ± {post['predicted_sd']:.2f}** pts")
+        if spread < 2 * unc:
+            st.error(
+                f"⚠️ **The posterior is flat relative to its own uncertainty** "
+                f"(spread {spread:.3f} vs mean SD {unc:.3f}). This level is not "
+                f"statistically distinguishable from many others. It is still the "
+                f"defensible choice to carry forward, but do not report it as a "
+                f"located optimum.")
+
+        with st.expander("Why not just use the last BO suggestion?"):
+            st.markdown(
+                "The acquisition function chooses where to **sample next**, "
+                "balancing exploration against exploitation — it is not a claim "
+                "about where the optimum is. Late in a run it is often still "
+                "exploring, or (as in sub-P997) its expected improvement has "
+                "collapsed to ~0 and the remaining trials are effectively "
+                "arbitrary. The final query point carries no special status.\n\n"
+                "**Caveat for this device:** a single GP spanning the ~15x "
+                "PF/DF stiffness asymmetry under-resolves the dorsiflexor arm. "
+                "If the optimum sits on the DF side, the posterior mean is least "
+                "trustworthy exactly where it matters, and two per-arm GPs would "
+                "be the fix.")
+
     # Which arm the trials went to. Worth watching across subjects: if DF keeps
     # winning, the single GP is under-resolving the arm that matters and the
     # two-GP split becomes worth building.
