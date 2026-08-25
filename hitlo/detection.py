@@ -75,7 +75,11 @@ class DetectionConfig:
     participants, consider loosening stance_tolerance_pct (stroke gait is
     noisier during stance due to compensatory strategies).
     """
-    # Sample rate (Polar H10)
+    # Sample rate. The default matches the Polar H10, but this MUST track
+    # whatever hardware produced the data — see for_stream() below. Every
+    # window in this pipeline is expressed in seconds and converted with fs,
+    # so a wrong fs silently rescales the lowpass cutoff, the minimum peak
+    # separation, the cluster gap and the stance window all at once.
     fs: int = 200
 
     # Jerk signal preparation — 50 Hz keeps the impact band (5–30 Hz) intact
@@ -102,6 +106,44 @@ class DetectionConfig:
 
     # Edge handling
     drop_edge_singletons: bool = True   # drop 1st/last cluster if it's a lone peak
+
+    # ------------------------------------------------------------------
+
+    def with_fs(self, fs: float) -> "DetectionConfig":
+        """Copy of this config at a different sample rate."""
+        from dataclasses import replace
+        return replace(self, fs=int(round(float(fs))))
+
+    def for_stream(self, stream, tolerance: float = 0.05,
+                   warn: bool = True) -> "DetectionConfig":
+        """Config matched to the sample rate a stream actually delivered.
+
+        The rate is MEASURED from the stream's timestamps rather than taken
+        from the nominal value, because those disagree in practice — Polar
+        straps nominally at 200 Hz measure 199.6-201.3 across trials.
+
+        This exists because the mismatch is invisible when it is small and
+        catastrophic when it is not. Polar at 200 vs a 200 default is a
+        fraction of a percent and nothing shows. Trigno Avanti at 148 Hz
+        against the same default is a 35% error applied to every time-based
+        window: the 50 Hz lowpass would be designed for the wrong Nyquist,
+        the 0.5 s cluster gap would span 0.68 s of real time, and the stance
+        window would sit in the wrong place. Detection would still return
+        plausible-looking heel strikes, just at the wrong times.
+        """
+        fs = float(getattr(stream, "actual_fs", self.fs))
+        if not np.isfinite(fs) or fs <= 0:
+            return self
+        if warn and abs(fs - self.fs) / max(self.fs, 1) > tolerance:
+            import warnings as _w
+            _w.warn(
+                f"DetectionConfig.fs is {self.fs} Hz but the stream measured "
+                f"{fs:.1f} Hz ({abs(fs - self.fs) / self.fs * 100:.0f}% off). "
+                f"Using the measured rate. Every window in the detector is "
+                f"derived from fs, so the configured value would have "
+                f"rescaled all of them.",
+                RuntimeWarning, stacklevel=2)
+        return self.with_fs(fs)
 
 
 # ===========================================================================
