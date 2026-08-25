@@ -251,9 +251,28 @@ def delete_checkpoint(config) -> None:
 # LSL live streaming
 # ===========================================================================
 
+def _active_config() -> dict:
+    """The config in effect, whether or not the session is initialized yet.
+
+    st.session_state.config stays None until Initialize runs on the Setup
+    page. The Sensors page is Step 0 and comes BEFORE that, so relying on
+    session state alone made it always fall back to Polar -- it could never
+    show the Trigno page however the config was set. Fall back to the file on
+    disk, which is what Setup would have loaded anyway.
+    """
+    cfg = st.session_state.get('config')
+    if cfg:
+        return cfg
+    try:
+        import yaml
+        with open(_config_path()) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
 def _backend() -> str:
-    cfg = st.session_state.get('config') or {}
-    return (cfg.get('Sensing') or {}).get('backend', 'polar')
+    return (_active_config().get('Sensing') or {}).get('backend', 'polar')
 
 
 def connect_to_lsl() -> bool:
@@ -282,8 +301,8 @@ def connect_to_lsl() -> bool:
         streams = resolve_streams(wait_time=3.0)
 
         if _backend() == 'trigno':
-            want = ((st.session_state.get('config') or {}).get('Sensing')
-                    or {}).get('stream', 'TrignoIMU')
+            want = (_active_config().get('Sensing') or {}).get(
+                'stream', 'TrignoIMU')
             for s in streams:
                 if s.name() != want:
                     continue
@@ -2646,7 +2665,7 @@ def page_sensors():
 def _page_sensors_trigno():
     section_chip("Step 0 · Sensors")
     st.header("🛰️ Sensors — Trigno")
-    cfg = st.session_state.get('config') or {}
+    cfg = _active_config()
     want = (cfg.get('Sensing') or {}).get('stream', 'TrignoIMU')
     st.caption(f"Pairing and slot assignment happen in the Trigno Control "
                f"Utility on the base-station machine. This page verifies what "
