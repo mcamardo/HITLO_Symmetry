@@ -185,6 +185,69 @@ def test_ramp_spans_the_torque_range():
     return f"ramp covers {covered*100:.0f}% of dose range, {min(doses):+.1f} to {max(doses):+.1f} Nm"
 
 
+def test_detection_config_tracks_the_real_sample_rate():
+    """cfg.fs must follow the hardware, not a hardcoded default.
+
+    Every window in the detector is written in seconds and converted with
+    fs, so a wrong fs rescales the lowpass cutoff, the minimum peak
+    separation, the cluster gap and the stance window simultaneously. That
+    is invisible for Polar (nominal 200, measured 199.6-201.3) and a 26%
+    error for a Trigno Avanti at 148 Hz — detection would still return
+    plausible heel strikes, at the wrong times.
+    """
+    import warnings as _w
+
+    class _S:
+        actual_fs = 148.1
+
+    base = DetectionConfig()
+    assert base.fs == 200, "default should still describe the Polar hardware"
+
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        cfg = base.for_stream(_S())
+        assert cfg.fs == 148, f"expected 148, got {cfg.fs}"
+        assert caught, "a >5% sample-rate mismatch must warn, not pass silently"
+
+    # A rate close to the default must NOT warn, or the warning becomes noise
+    # that gets ignored on the day it matters.
+    class _P:
+        actual_fs = 200.6
+
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        cfg_p = base.for_stream(_P())
+        assert cfg_p.fs == 201
+        assert not caught, "a sub-1% difference should be silent"
+
+    # The windows must actually move with fs.
+    assert int(base.cluster_gap_s * cfg.fs) < int(base.cluster_gap_s * base.fs)
+    return f"148.1 Hz -> fs=148 with warning; 200.6 Hz -> fs=201 silently"
+
+
+def test_polar_backend_unchanged_by_io_generalization():
+    """Generalizing io for Trigno must not perturb the Polar path.
+
+    load_streams with no config, and with backend=polar, must both return
+    exactly what load_both_polar_streams returned before the refactor.
+    """
+    from hitlo.io import (load_both_polar_streams, load_streams,
+                          live_stream_names, PolarStream, SensorStream)
+    if not REAL_XDF.is_file():
+        return "SKIPPED — reference recording not on this machine"
+    a, _ = load_both_polar_streams(str(REAL_XDF))
+    b, _ = load_streams(str(REAL_XDF), None)
+    c, _ = load_streams(str(REAL_XDF), {'Sensing': {'backend': 'polar'}})
+    assert a is not None and b is not None and c is not None
+    assert np.array_equal(a.accel, b.accel) and np.array_equal(a.accel, c.accel)
+    assert np.array_equal(a.timestamps, b.timestamps)
+    assert PolarStream is SensorStream, "old name must still resolve"
+    assert a.gyro is None and not a.has_gyro, "Polar has no gyro"
+    assert live_stream_names(None) == ['polar accel left', 'polar accel right']
+    assert live_stream_names({'Sensing': {'backend': 'trigno'}}) == ['TrignoIMU']
+    return "polar load identical through the dispatch layer"
+
+
 def test_real_recording_end_to_end():
     """The actual file that failed today must now analyze cleanly."""
     if not REAL_XDF.is_file():
