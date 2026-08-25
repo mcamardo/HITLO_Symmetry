@@ -44,7 +44,8 @@ from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index,
     trim_peaks, filter_implausible_strides,
 )
-from hitlo.io import load_both_polar_streams
+from hitlo.io import load_streams, load_both_polar_streams
+from hitlo.detectors import detect as detect_strikes
 
 
 # ===========================================================================
@@ -441,17 +442,32 @@ def main() -> int:
     cfg = DetectionConfig(**cfg_kwargs)
 
     print(f"Loading {args.xdf_file} ...")
-    left, right = load_both_polar_streams(args.xdf_file)
+    # Try both backends. The file itself decides which it is, so the tool
+    # works on any recording without being told, and without a config.
+    left, right = load_streams(args.xdf_file, {'Sensing': {'backend': 'trigno'}})
+    detect_cfg_kind = 'gyro'
     if left is None or right is None:
-        print(f"❌ Missing 'polar accel left' or 'polar accel right' stream")
+        left, right = load_both_polar_streams(args.xdf_file)
+        detect_cfg_kind = 'accel'
+    if left is not None:
+        print(f"   backend: {left.backend}   detector: {detect_cfg_kind}"
+              f"   {left.actual_fs:.1f} Hz")
+    if left is None or right is None:
+        print("❌ Could not read left/right streams from this file.")
+        print("   Polar recordings need 'polar accel left' and "
+              "'polar accel right'.")
+        print("   Trigno recordings need a 'TrignoIMU' stream whose channel "
+              "labels name\n   the side and segment (left_shank_gyr_z, ...).")
         return 1
 
     print(f"   Left:  {len(left.accel)} samples ({left.actual_fs:.2f} Hz)")
     print(f"   Right: {len(right.accel)} samples ({right.actual_fs:.2f} Hz)")
 
     # Run detection on both sensors
-    left_result = detect_heelstrikes_full(left.accel, left.timestamps, cfg=cfg)
-    right_result = detect_heelstrikes_full(right.accel, right.timestamps, cfg=cfg)
+    conf = {'Sensing': {'backend': left.backend,
+                        'detector': detect_cfg_kind}}
+    left_result = detect_strikes(left, conf, cfg=cfg)
+    right_result = detect_strikes(right, conf, cfg=cfg)
 
     print(f"\n[LEFT ] {len(left_result.all_candidates)} candidates "
           f"-> {len(left_result.heel_strike_indices)} heel strikes")

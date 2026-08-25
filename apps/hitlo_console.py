@@ -287,7 +287,8 @@ def connect_to_lsl() -> bool:
             for s in streams:
                 if s.name() != want:
                     continue
-                cols = _trigno_columns(s)
+                inlet = StreamInlet(s)
+                cols = _trigno_columns(inlet)
                 if cols is None:
                     # No usable labels. Refuse rather than guess a column
                     # order: guessing wrong swaps the legs, which inverts the
@@ -297,7 +298,6 @@ def connect_to_lsl() -> bool:
                         f"left_acc_x ... right_gyr_z. Cannot split left from "
                         f"right without them.")
                     return False
-                inlet = StreamInlet(s)
                 st.session_state.trigno_cols = cols
                 st.session_state.trigno_label_error = None
                 st.session_state.lsl_inlet_left = inlet
@@ -315,15 +315,22 @@ def connect_to_lsl() -> bool:
             st.session_state.lsl_inlet_right is not None)
 
 
-def _trigno_columns(stream_info):
+def _trigno_columns(inlet):
     """Column indices for each side's accel in a multiplexed Trigno stream.
 
     Returns {'left': [x,y,z], 'right': [x,y,z]} or None if the labels are
     absent or incomplete. Accel only — the live plot shows acceleration for
     both backends so the display stays comparable.
+
+    LSL SUBTLETY: resolve_streams() returns metadata-LIGHT StreamInfo objects
+    with an empty desc, so channel labels are NOT available there. The full
+    description only arrives after opening an inlet and calling inlet.info().
+    Reading labels off the resolved info silently yields none, which looks
+    exactly like a bridge that forgot to declare them.
     """
     try:
-        chans = stream_info.desc().child('channels').child('channel')
+        full = inlet.info(timeout=5.0)
+        chans = full.desc().child('channels').child('channel')
         labels = []
         while not chans.empty():
             labels.append(chans.child_value('label').strip().lower())
@@ -337,6 +344,13 @@ def _trigno_columns(stream_info):
         cols = {}
         for i, lab in enumerate(labels):
             if not lab.startswith(side):
+                continue
+            # SHANK only. A foot or thigh sensor also starts with the side and
+            # contains 'acc', and with channel order left_shank, right_foot,
+            # right_shank the foot columns come FIRST and would silently be
+            # taken as "right" — showing the wrong body segment in the live
+            # display and in the leg check.
+            if 'foot' in lab or 'thigh' in lab:
                 continue
             if not any(tok in lab for tok in ('acc', 'accel')):
                 continue
@@ -2579,26 +2593,207 @@ def _stop_streamer(side: str):
     st.session_state[f'proc_{side}'] = None
 
 
-def _motion_now(side: str, seconds: float = 0.6):
-    """Current motion on one stream: std of |a| over a short window."""
-    inlet = st.session_state.get(f'lsl_inlet_{side}')
-    if inlet is None:
-        return None
+def _motion_both(seconds: float = 0.6):
+    """Motion on both sides over the same window: {'left': v, 'right': v}.
+
+    Both backends are handled here rather than per side, because on Trigno the
+    two sides share ONE inlet — pulling it once per side would race, with each
+    pull consuming samples the other never sees.
+    """
     import time as _t
-    mags, t0 = [], _t.time()
+    li = st.session_state.get('lsl_inlet_left')
+    ri = st.session_state.get('lsl_inlet_right')
+    if li is None or ri is None:
+        return {}
+    cols = st.session_state.get('trigno_cols')
+    shared = cols is not None and li is ri
+    mags = {'left': [], 'right': []}
+    t0 = _t.time()
     while _t.time() - t0 < seconds:
-        chunk, _ = inlet.pull_chunk(timeout=0.05, max_samples=256)
-        for smp in chunk:
-            if len(smp) >= 3:
-                mags.append((smp[0]**2 + smp[1]**2 + smp[2]**2) ** 0.5)
-    if len(mags) < 5:
-        return None
-    return float(np.std(np.asarray(mags)))
+        if shared:
+            chunk, _ = li.pull_chunk(timeout=0.05, max_samples=256)
+            for smp in chunk:
+                for sd in ('left', 'right'):
+                    cx, cy, cz = cols[sd]
+                    if len(smp) > max(cx, cy, cz):
+                        mags[sd].append(
+                            (smp[cx]**2 + smp[cy]**2 + smp[cz]**2) ** 0.5)
+        else:
+            for sd, inl in (('left', li), ('right', ri)):
+                chunk, _ = inl.pull_chunk(timeout=0.05, max_samples=256)
+                for smp in chunk:
+                    if len(smp) >= 3:
+                        mags[sd].append(
+                            (smp[0]**2 + smp[1]**2 + smp[2]**2) ** 0.5)
+    return {sd: (float(np.std(np.asarray(v))) if len(v) >= 5 else None)
+            for sd, v in mags.items()}
 
 
 def page_sensors():
+    """Sensor setup. The two backends need entirely different pages.
+
+    Polar sensors are paired over BLE from this machine, so the page scans,
+    assigns sides and starts per-sensor processes. Trigno sensors are paired
+    in the Trigno Control Utility on the Windows machine and reach us as one
+    already-assembled LSL stream, so there is nothing here to scan or start —
+    only to verify.
+    """
+    if _backend() == 'trigno':
+        return _page_sensors_trigno()
+    return _page_sensors_polar()
+
+
+def _page_sensors_trigno():
     section_chip("Step 0 · Sensors")
-    st.header("🛰️ Sensors")
+    st.header("🛰️ Sensors — Trigno")
+    cfg = st.session_state.get('config') or {}
+    want = (cfg.get('Sensing') or {}).get('stream', 'TrignoIMU')
+    st.caption(f"Pairing and slot assignment happen in the Trigno Control "
+               f"Utility on the base-station machine. This page verifies what "
+               f"arrives as **{want}**.")
+
+    # ---- 1. is the stream there, and what is in it ----
+    st.subheader("1 · Stream")
+    if st.button("🔍 Look for the stream (3 s)", width="stretch"):
+        st.session_state.trigno_probe = _probe_trigno_stream(want)
+    probe = st.session_state.get('trigno_probe')
+    if probe is None:
+        st.info(f"Not checked yet. The bridge must be running on the "
+                f"base-station machine and publishing **{want}**.")
+    elif probe.get('error'):
+        st.error(probe['error'])
+    else:
+        a, b, c = st.columns(3)
+        a.metric("channels", probe['n_channels'])
+        b.metric("rate", f"{probe['srate']:.0f} Hz")
+        c.metric("host", probe['host'])
+        inv = probe['inventory']
+        if inv:
+            st.markdown("**Sensors detected, by label:**")
+            for side in ('left', 'right'):
+                segs = inv.get(side, [])
+                if segs:
+                    st.markdown(f"- **{side}** — " + ", ".join(sorted(segs)))
+                else:
+                    st.warning(f"- **{side}** — nothing found")
+            missing = [sd for sd in ('left', 'right')
+                       if 'shank' not in inv.get(sd, [])]
+            if missing:
+                st.error(
+                    f"No shank sensor for: {', '.join(missing)}. Step-time "
+                    f"symmetry needs a shank sensor on BOTH legs — extra "
+                    f"segments (foot, thigh) are carried but not used by the "
+                    f"cost function.")
+            else:
+                st.success("Both shanks present — the cost function has what "
+                           "it needs.")
+        else:
+            st.error(
+                "The stream declares no usable channel labels. Left and right "
+                "cannot be separated without them, and guessing a column order "
+                "would swap the legs — which inverts the symmetry index while "
+                "producing entirely plausible numbers. Fix the labels in the "
+                "bridge (left_shank_gyr_z, right_foot_acc_x, ...).")
+
+    st.markdown("---")
+
+    # ---- 2. live attachment ----
+    st.subheader("2 · Live data")
+    connect_to_lsl()
+    err = st.session_state.get('trigno_label_error')
+    if err:
+        st.error(err)
+    live = (st.session_state.get('lsl_inlet_left') is not None and
+            st.session_state.get('lsl_inlet_right') is not None)
+    if live:
+        st.success("Attached — both sides are being read from the stream.")
+    else:
+        st.warning("Not attached. Start the bridge, then reload this page.")
+    if st.button("🔄 Re-attach"):
+        st.session_state.lsl_inlet_left = None
+        st.session_state.lsl_inlet_right = None
+        st.session_state.trigno_cols = None
+        connect_to_lsl()
+        st.rerun()
+
+    st.markdown("---")
+
+    # ---- 3. the leg check ----
+    st.subheader("3 · Confirm which leg is which")
+    st.caption("Shake one leg at a time and watch which bar responds. On "
+               "Trigno the side comes from the **bridge's slot-to-label "
+               "mapping**, not from anything on this machine — so if the wrong "
+               "bar moves, the fix is in the bridge, not here.")
+    _live_bars_shared()
+
+    st.markdown("---")
+    st.subheader("4 · Preflight")
+    if st.button("🚦 Run preflight"):
+        import subprocess
+        r = subprocess.run([sys.executable, str(REPO_ROOT / 'apps' / 'preflight.py')],
+                           capture_output=True, text=True, cwd=str(REPO_ROOT))
+        (st.success if r.returncode == 0 else st.error)(
+            "READY" if r.returncode == 0 else "NOT READY")
+        st.code(r.stdout or r.stderr, language=None)
+
+
+def _probe_trigno_stream(want: str) -> dict:
+    """One look at the named LSL stream: shape, rate, host, and inventory."""
+    try:
+        from pylsl import resolve_streams
+        for s in resolve_streams(wait_time=3.0):
+            if s.name() != want:
+                continue
+            labels = []
+            try:
+                ch = s.desc().child('channels').child('channel')
+                while not ch.empty():
+                    labels.append(ch.child_value('label').strip().lower())
+                    ch = ch.next_sibling()
+            except Exception:
+                pass
+            inv = {}
+            for lab in labels:
+                for side in ('left', 'right'):
+                    if lab.startswith(side):
+                        seg = ('foot' if 'foot' in lab else
+                               'thigh' if 'thigh' in lab else 'shank')
+                        inv.setdefault(side, set()).add(seg)
+            return {'n_channels': s.channel_count(), 'srate': s.nominal_srate(),
+                    'host': s.hostname(), 'inventory': {k: sorted(v) for k, v in inv.items()},
+                    'error': None}
+        return {'error': f"No stream named '{want}' on the network. Is the "
+                         f"bridge running on the base-station machine?"}
+    except Exception as e:
+        return {'error': f"{type(e).__name__}: {e}"}
+
+
+def _live_bars_shared():
+    @st.fragment(run_every=0.8)
+    def _bars():
+        connect_to_lsl()
+        if (st.session_state.get('lsl_inlet_left') is None or
+                st.session_state.get('lsl_inlet_right') is None):
+            st.info("Waiting for the stream — the bars appear as soon as data "
+                    "is flowing.")
+            return
+        mv = _motion_both()
+        ml = mv.get('left') or 0.0
+        mr = mv.get('right') or 0.0
+        top = max(ml, mr, 1.0)
+        f1, f2 = st.columns(2)
+        for col, name, val in ((f1, 'LEFT', ml), (f2, 'RIGHT', mr)):
+            with col:
+                moving = val > 2.5 * min(ml, mr) and val > 60
+                st.markdown(f"**{name}** {'🟢 MOVING' if moving else ''}")
+                st.progress(min(val / top, 1.0))
+                st.caption(f"motion {val:.0f}")
+    _bars()
+
+
+def _page_sensors_polar():
+    section_chip("Step 0 · Sensors")
+    st.header("🛰️ Sensors — Polar H10")
     st.caption("Get both straps streaming, then confirm which LEG each one is on. "
                "A device id names a strap, not the limb it ended up on.")
 
@@ -2712,8 +2907,9 @@ def page_sensors():
                 st.session_state.get('lsl_inlet_right') is None):
             st.info("Both streams must be running for the live test.")
             return
-        ml = _motion_now('left') or 0.0
-        mr = _motion_now('right') or 0.0
+        mv = _motion_both()
+        ml = mv.get('left') or 0.0
+        mr = mv.get('right') or 0.0
         top = max(ml, mr, 1.0)
         f1, f2 = st.columns(2)
         for col, name, val in ((f1, 'LEFT', ml), (f2, 'RIGHT', mr)):
