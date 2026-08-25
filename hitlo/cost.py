@@ -35,11 +35,13 @@ import os
 import numpy as np
 
 from hitlo.detection import DetectionConfig, detect_heelstrikes_full
+from hitlo.detectors import detect as detect_strikes, detector_name
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index,
     trim_peaks, filter_implausible_strides,
 )
-from hitlo.io import load_both_polar_streams, load_polar_stream, trial_filename
+from hitlo.io import (load_both_polar_streams, load_polar_stream,
+                      load_streams, trial_filename)
 
 
 # ===========================================================================
@@ -114,6 +116,7 @@ class SymmetryCost:
                  signed: bool = False,
                  si_target: float = 0.0,
                  trim_seconds: float = 3.0,
+                 config: Optional[dict] = None,
                  ):
         self.cost_name = "gait_symmetry"
         self.trial_data_dir = trial_data_dir
@@ -121,6 +124,12 @@ class SymmetryCost:
         self.session = session
 
         self.detection_cfg = detection_cfg or DetectionConfig()
+
+        # Full experiment config, used only to select the sensor backend and
+        # detection method. None keeps the historical Polar behaviour, which
+        # is what every saved session config produces.
+        self.config = config
+        self.detector = detector_name(config)
 
         self.signed = signed
         self.si_target = si_target
@@ -138,7 +147,11 @@ class SymmetryCost:
             print(f"   SI target:         {si_target:+.1f}%  "
                   f"(BO drives SI toward this; applied in hil_exo)")
         print(f"   Directory:         {trial_data_dir}")
-        print(f"   Detection:         cluster-keep-last + stance confirm")
+        print(f"   Backend:           {(config or {}).get('Sensing', {}).get('backend', 'polar')}"
+              f"   detector: {self.detector}")
+        print(f"   Detection:         "
+              + ("swing peak -> negative zero crossing" if self.detector == 'gyro'
+                 else "cluster-keep-last + stance confirm"))
         print(f"   Jerk threshold:    {self.detection_cfg.strict_thresh:.2f} SD strict / "
               f"{self.detection_cfg.recovery_thresh:.2f} SD recovery")
         print(f"   Cluster gap:       {self.detection_cfg.cluster_gap_s}s")
@@ -194,7 +207,7 @@ class SymmetryCost:
             print("=" * 60)
             print(f"Loading {xdf_path}...")
 
-        left, right = load_both_polar_streams(xdf_path)
+        left, right = load_streams(xdf_path, self.config)
 
         if left is None or right is None:
             if verbose:
@@ -208,10 +221,8 @@ class SymmetryCost:
         warnings: List[str] = []
 
         # --- Detection (uses hitlo.detection pipeline) ---
-        left_result = detect_heelstrikes_full(left.accel, left.timestamps,
-                                              cfg=self.detection_cfg)
-        right_result = detect_heelstrikes_full(right.accel, right.timestamps,
-                                               cfg=self.detection_cfg)
+        left_result = detect_strikes(left, self.config, cfg=self.detection_cfg)
+        right_result = detect_strikes(right, self.config, cfg=self.detection_cfg)
 
         if verbose:
             print(f"   Left:  {len(left_result.strict_peaks)} strict "

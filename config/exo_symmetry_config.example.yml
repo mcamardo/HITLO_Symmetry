@@ -26,6 +26,29 @@ Subject:
   # <base_dir>/sub-<id>/ses-<session>/eeg/
   base_dir: /Users/maccamardo/HITLO_Data
 
+Sensing:
+  # Which hardware produced the recording, and how to find heel strikes in it.
+  #
+  #   backend   polar    two LSL streams ('polar accel left'/'right'),
+  #                      accelerometer only, ~200 Hz
+  #             trigno   ONE stream carrying both sides, accel AND gyro,
+  #                      side encoded in the channel labels, ~148 Hz
+  #
+  #   detector  accel    jerk peaks + clustering (hitlo/detection.py)
+  #             gyro     swing peak -> negative zero crossing
+  #                      (hitlo/detection_gyro.py)
+  #
+  # detector defaults per backend (polar->accel, trigno->gyro), so a config
+  # without this block behaves exactly as it did before the block existed.
+  #
+  # The two detectors find DIFFERENT INSTANTS -- the gyro zero crossing is
+  # initial contact, the jerk peak is the impact shock after it. A baseline
+  # collected with one must not be carried into a session run with the other.
+  # apps/compare_detectors.py measures the difference on your own recording.
+  backend: polar
+  detector: accel
+  stream: TrignoIMU        # only used when backend is trigno
+
 Cost:
   # Aim 1 = neurotypical, induce a target asymmetry relative to the subject's
   #         own baseline (a baseline phase runs first and overrides si_target).
