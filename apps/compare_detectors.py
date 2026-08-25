@@ -17,8 +17,9 @@ both on the same walk so neither has to be argued about:
 
 1. How far apart the two methods place contact. A constant offset is
    harmless for symmetry index -- step time is a difference between legs, so
-   a shared offset cancels. A DIFFERENT offset per leg does not cancel, and
-   goes straight into SI at roughly 0.28 points per millisecond.
+   a shared offset cancels. A DIFFERENT offset per leg does not cancel: it
+   moves SI by 0.4/stride points per millisecond, which the tool computes
+   from the recording's own stride time rather than assuming a value.
 
 2. Whether the accelerometer path was mismeasuring one leg. That is the open
    question from the Polar sessions: a persistent ~74 ms left-late offset
