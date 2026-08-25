@@ -248,6 +248,115 @@ def test_polar_backend_unchanged_by_io_generalization():
     return "polar load identical through the dispatch layer"
 
 
+def _synth_shank_gyro(fs=148.0, stride=1.20, n_strides=30, contact_frac=0.72,
+                      swing_amp=300.0, stance_frac=0.35, noise=4.0,
+                      sign=+1, width=0.12, seed=0):
+    """Shank sagittal velocity with KNOWN contact times.
+
+    Big positive swing peak, zero crossing exactly at contact, smaller
+    negative stance lobe after — the shape the zero-crossing rule keys on.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(n_strides * stride * fs)
+    t = np.arange(n) / fs
+    w = np.zeros(n)
+    contacts = []
+    for k in range(n_strides):
+        tc = k * stride + contact_frac * stride
+        if tc > t[-1] - 0.6 or tc < 0.6:
+            continue
+        contacts.append(tc)
+        m = np.abs(t - tc) < 0.45
+        tau = t[m] - tc
+        lobe = (-tau / width) * np.exp(-0.5 * (tau / width) ** 2) * np.e ** 0.5
+        lobe = np.where(tau > 0, lobe * stance_frac, lobe)
+        w[m] += swing_amp * lobe
+    w += rng.normal(0, noise, n)
+    g = np.zeros((n, 3))
+    g[:, 2] = w * sign
+    return g, t + 1000.0, np.array(contacts) + 1000.0
+
+
+def test_gyro_detector_finds_known_contacts():
+    """Zero-crossing detection must recover contacts it was given."""
+    from hitlo.detection_gyro import GyroDetectionConfig, detect_heelstrikes_gyro
+    worst = 0.0
+    for label, kw in (("nominal", {}),
+                      ("noisy", {"noise": 16.0}),
+                      ("slow", {"stride": 1.6}),
+                      ("fast", {"stride": 0.95}),
+                      ("damped swing", {"swing_amp": 100.0}),
+                      ("200 Hz", {"fs": 200.0})):
+        fs = kw.get("fs", 148.0)
+        g, t, truth = _synth_shank_gyro(**kw)
+        res = detect_heelstrikes_gyro(
+            g, t, cfg=GyroDetectionConfig(fs=int(fs)))
+        det = np.asarray(res.heel_strike_times)
+        assert len(det) == len(truth), (
+            f"{label}: found {len(det)} of {len(truth)} contacts")
+        err = np.array([abs(det[np.argmin(np.abs(det - c))] - c) * 1000
+                        for c in truth])
+        assert np.median(err) < 10.0, (
+            f"{label}: median timing error {np.median(err):.1f} ms")
+        worst = max(worst, float(np.median(err)))
+    return f"all contacts recovered in 6 regimes, worst median error {worst:.1f} ms"
+
+
+def test_gyro_detector_survives_inverted_mounting():
+    """Gyro polarity depends on how the sensor was clipped on.
+
+    Getting it wrong locks onto the stance reversal instead of swing: every
+    event lands at the wrong point in the cycle while still looking like a
+    clean periodic detection. Inferring polarity from which excursion is
+    larger fails when the two lobes are comparable — it decides on noise —
+    so the detector runs BOTH polarities and keeps the better result.
+    """
+    from hitlo.detection_gyro import GyroDetectionConfig, detect_heelstrikes_gyro
+    cfg = GyroDetectionConfig(fs=148)
+    out = {}
+    for sign in (+1, -1):
+        for stance_frac, tag in ((0.35, "asymmetric"), (1.0, "symmetric")):
+            g, t, truth = _synth_shank_gyro(sign=sign, stance_frac=stance_frac)
+            det = np.asarray(
+                detect_heelstrikes_gyro(g, t, cfg=cfg).heel_strike_times)
+            assert len(det) == len(truth), (
+                f"sign={sign:+d} {tag}: found {len(det)} of {len(truth)}")
+            err = np.median([abs(det[np.argmin(np.abs(det - c))] - c) * 1000
+                             for c in truth])
+            assert err < 10.0, f"sign={sign:+d} {tag}: {err:.1f} ms error"
+            out[(sign, tag)] = err
+    return ("polarity resolved in all 4 combinations, worst "
+            f"{max(out.values()):.1f} ms")
+
+
+def test_gyro_timing_bias_is_common_mode():
+    """A shared timing offset must cancel out of the symmetry index.
+
+    Filter group delay shifts BOTH legs' events by the same amount. Step
+    time is the gap between a left and a right event, so a common offset
+    cancels exactly and only a DIFFERENTIAL bias can reach SI. This pins
+    that, because if it ever stopped being true the detector would inject
+    asymmetry that looks like gait.
+    """
+    from hitlo.detection_gyro import GyroDetectionConfig, detect_heelstrikes_gyro
+    from hitlo.symmetry import compute_step_times, compute_symmetry_index
+    cfg = GyroDetectionConfig(fs=148)
+    gl, tl, _ = _synth_shank_gyro(contact_frac=0.72, seed=1)
+    gr, tr, _ = _synth_shank_gyro(contact_frac=0.22, seed=2)
+    lt = np.asarray(detect_heelstrikes_gyro(gl, tl, cfg=cfg).heel_strike_times)
+    rt = np.asarray(detect_heelstrikes_gyro(gr, tr, cfg=cfg).heel_strike_times)
+    rs, ls = compute_step_times(lt, rt)
+    n = min(len(rs), len(ls))
+    assert n >= 10, f"only {n} stride pairs from the synthetic pair"
+    si, _ = compute_symmetry_index(rs[:n], ls[:n], signed=True)
+    # Both legs are the same synthetic waveform offset in phase, so any
+    # detector bias is identical on both and must not create asymmetry.
+    assert abs(si) < 6.0, (
+        f"identical waveforms on both legs produced SI={si:+.2f}%, so the "
+        f"detector is injecting asymmetry rather than measuring it")
+    return f"identical L/R waveforms give SI={si:+.2f}% (bias cancels)"
+
+
 def test_real_recording_end_to_end():
     """The actual file that failed today must now analyze cleanly."""
     if not REAL_XDF.is_file():
