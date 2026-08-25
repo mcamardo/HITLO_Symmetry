@@ -329,6 +329,60 @@ def test_gyro_detector_survives_inverted_mounting():
             f"{max(out.values()):.1f} ms")
 
 
+def test_gyro_peak_spacing_adapts_to_cadence():
+    """Swing-peak spacing must follow the subject's stride, not a fixed floor.
+
+    THE BUG: min_peak_dist_s defaulted to 0.40 s, chosen against synthetic
+    data. On a real 1.42 s stride that admits three "swing peaks" per cycle,
+    so post-contact ringing on one limb became a second detected contact.
+    Observed on sub-P012: one leg returned 62 events to the other's 56 over
+    the same window, alternation fell to 87%, and SEM was 4x worse.
+
+    The detector now runs a second pass with spacing derived from the stride
+    the first pass measured.
+    """
+    from hitlo.detection_gyro import GyroDetectionConfig, detect_heelstrikes_gyro
+    from dataclasses import replace
+
+    # A long stride with a ringing artifact after each contact — the shape
+    # that defeats a fixed floor.
+    fs, stride = 148.0, 1.45
+    g, t, truth = _synth_shank_gyro(fs=fs, stride=stride, n_strides=30)
+    w = g[:, 2].copy()
+    rng = np.random.default_rng(3)
+    for c in truth:
+        i = int((c - t[0]) * fs)
+        for lag_s, amp in ((0.30, 0.30), (0.45, 0.22)):
+            j = i + int(lag_s * fs)
+            if 0 <= j < len(w) - 20:
+                k = np.arange(-10, 10)
+                w[j + k] += amp * 300 * np.exp(-0.5 * (k / 4.0) ** 2)
+    g[:, 2] = w + rng.normal(0, 3, len(w))
+
+    base = GyroDetectionConfig(fs=int(fs))
+    fixed = detect_heelstrikes_gyro(
+        g, t, cfg=replace(base, adaptive_dist_frac=None))
+    adaptive = detect_heelstrikes_gyro(g, t, cfg=base)
+
+    n_fix = len(fixed.heel_strike_times)
+    n_ada = len(adaptive.heel_strike_times)
+    assert n_fix > len(truth), (
+        "the fixture should over-detect with a fixed floor, or it is not "
+        f"exercising the bug (got {n_fix} for {len(truth)} contacts)")
+    assert abs(n_ada - len(truth)) <= 2, (
+        f"adaptive pass should recover ~{len(truth)} contacts, got {n_ada}")
+
+    def cv(x):
+        iv = np.diff(np.sort(x))
+        return float(np.std(iv) / np.mean(iv))
+
+    assert cv(adaptive.heel_strike_times) < cv(fixed.heel_strike_times), (
+        "adaptive spacing should produce a more regular event series")
+    return (f"fixed floor {n_fix} events (CV {cv(fixed.heel_strike_times):.3f}), "
+            f"adaptive {n_ada} (CV {cv(adaptive.heel_strike_times):.3f}), "
+            f"truth {len(truth)}")
+
+
 def test_gyro_timing_bias_is_common_mode():
     """A shared timing offset must cancel out of the symmetry index.
 
