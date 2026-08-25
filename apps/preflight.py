@@ -37,6 +37,8 @@ if _cfg.is_file() and 'LSLAPICFG' not in os.environ:
 import numpy as np
 import yaml
 
+from hitlo.io import backend_modality, live_stream_names
+
 OK, WARN, BAD = "OK  ", "WARN", "FAIL"
 issues = {'fail': 0, 'warn': 0}
 
@@ -82,7 +84,8 @@ def check_config():
     report(OK, "subject", f"{sid} / {ses}   aim={cfg['Cost']['aim']}")
 
     base = Path(cfg['Subject']['base_dir'])
-    eeg = base / f"sub-{sid}" / f"ses-{ses}" / "eeg"
+    # follows the backend: eeg/ for Polar, motion/ for Trigno
+    eeg = base / f"sub-{sid}" / f"ses-{ses}" / backend_modality(cfg)
     existing = sorted(eeg.glob("*.xdf")) if eeg.is_dir() else []
     if existing:
         report(WARN, "existing data",
@@ -128,7 +131,7 @@ def check_checkpoint(cfg):
 
 # --- 4. LSL ----------------------------------------------------------------
 
-def check_lsl():
+def check_lsl(cfg_for_streams=None):
     print("\n4. LSL STREAMS")
     import socket, time
     from pylsl import StreamInlet, resolve_streams
@@ -146,7 +149,7 @@ def check_lsl():
         else:
             foreign.append((s.name(), host))
 
-    for want in ('polar accel left', 'polar accel right'):
+    for want in live_stream_names(cfg_for_streams):
         if want not in mine:
             report(BAD, want, "NOT PRESENT on this machine")
             continue
@@ -179,7 +182,8 @@ def check_last_recording(cfg):
     if cfg is None:
         return
     sid, ses = cfg['Subject']['id'], cfg['Subject']['session']
-    eeg = Path(cfg['Subject']['base_dir']) / f"sub-{sid}" / f"ses-{ses}" / "eeg"
+    eeg = (Path(cfg['Subject']['base_dir']) / f"sub-{sid}" / f"ses-{ses}"
+           / backend_modality(cfg))
     files = sorted(eeg.glob("*.xdf"), key=lambda f: f.stat().st_mtime) if eeg.is_dir() else []
     if not files:
         report(OK, "analysis", "no recordings yet — nothing to verify")
@@ -191,10 +195,13 @@ def check_last_recording(cfg):
     # SymmetryCost prints a banner from its constructor, so build it inside the
     # redirect too, not just the analysis call.
     with contextlib.redirect_stdout(buf):
+        # Pass the config, or the cost function defaults to the Polar loader
+        # and reports "no usable accel stream" on a perfectly good Trigno file.
         c = SymmetryCost(trial_data_dir=str(eeg), subject_id=sid, session=ses,
                          signed=cfg['Cost'].get('signed', True),
                          si_target=float(cfg['Cost'].get('si_target', 0.0)),
-                         trim_seconds=float(cfg['Cost'].get('trim_seconds', 3.0)))
+                         trim_seconds=float(cfg['Cost'].get('trim_seconds', 3.0)),
+                         config=cfg)
         a = c.analyze_trial(trial_num=1, filename=latest.name, verbose=False)
     if a is None:
         report(BAD, latest.name[-28:], f"analysis failed: {c.last_failure}")
@@ -214,7 +221,7 @@ def main() -> int:
     cfg = check_config()
     check_checkpoint(cfg)
     try:
-        check_lsl()
+        check_lsl(cfg)
     except Exception as e:
         report(BAD, "LSL", f"{type(e).__name__}: {e}")
     try:

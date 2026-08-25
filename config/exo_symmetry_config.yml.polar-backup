@@ -1,14 +1,10 @@
 Subject:
-  id: P012
+  id: P996
   session: S001
   base_dir: /Users/maccamardo/HITLO_Data
-Sensing:
-  backend: trigno
-  detector: gyro
-  stream: TrignoIMU
 Cost:
   aim: Aim 1
-  sample_rate: 148
+  sample_rate: 200
   time: 90
   signed: true
   si_target: -3.0

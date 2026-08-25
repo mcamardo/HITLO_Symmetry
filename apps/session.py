@@ -133,7 +133,8 @@ def subject():
     sid = ask("subject id", cur)
     ses = cfg['Subject']['session']
     base = Path(cfg['Subject']['base_dir'])
-    eeg = base / f"sub-{sid}" / f"ses-{ses}" / "eeg"
+    from hitlo.io import backend_modality
+    eeg = base / f"sub-{sid}" / f"ses-{ses}" / backend_modality(cfg)
     ck = (base / f"sub-{sid}" / f"ses-{ses}" / "derivatives" /
           "hil_optimization" / f"sub-{sid}_ses-{ses}_checkpoint.json")
     n = len(list(eeg.glob('*.xdf'))) if eeg.is_dir() else 0
