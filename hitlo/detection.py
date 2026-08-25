@@ -143,7 +143,7 @@ class DetectionConfig:
                 f"derived from fs, so the configured value would have "
                 f"rescaled all of them.",
                 RuntimeWarning, stacklevel=2)
-        return self.with_fs(fs)
+        return self.with_fs(fs)                         
 
 
 # ===========================================================================
