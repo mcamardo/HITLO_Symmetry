@@ -75,7 +75,19 @@ class GyroDetectionConfig:
     # peak swing rate rather than an absolute deg/s, so it transfers across
     # subjects and walking speeds without retuning.
     swing_peak_frac: float = 0.35
-    min_peak_dist_s: float = 0.40     # one swing peak per stride
+    min_peak_dist_s: float = 0.40     # floor for the first pass only
+
+    # After a first pass establishes the subject's actual stride time, the
+    # detector re-runs with the peak spacing set to this fraction of it.
+    #
+    # A fixed floor cannot do this job: 0.40 s is a sensible lower bound, but
+    # at a 1.42 s stride it admits three "swing peaks" per cycle, so any
+    # post-contact ringing on a limb becomes a second detected contact. That
+    # was observed on real data -- one leg returning 62 events to the other's
+    # 56 over the same window, purely from ringing between strides.
+    #
+    # Set to None to disable the second pass and keep the fixed floor.
+    adaptive_dist_frac: Optional[float] = 0.60
 
     # How far after a swing peak to look for the crossing. Contact follows
     # the peak closely; a wider window risks catching the next cycle.
@@ -290,15 +302,36 @@ def detect_heelstrikes_gyro(gyro: np.ndarray,
     # periodic, so the correct orientation is self-evident from the result.
     # ------------------------------------------------------------------
     if cfg.swing_sign is not None:
-        return _detect_one_polarity(w, t, cfg)
+        first = _detect_one_polarity(w, t, cfg)
+        oriented = w
+    else:
+        pos = _detect_one_polarity(w, t, cfg)
+        neg = _detect_one_polarity(-w, t, cfg)
+        n_pos, n_neg = len(pos.heel_strike_times), len(neg.heel_strike_times)
+        if n_pos == n_neg:
+            use_pos = (_regularity(pos.heel_strike_times) <=
+                       _regularity(neg.heel_strike_times))
+        else:
+            use_pos = n_pos > n_neg
+        first, oriented = (pos, w) if use_pos else (neg, -w)
 
-    pos = _detect_one_polarity(w, t, cfg)
-    neg = _detect_one_polarity(-w, t, cfg)
-    n_pos, n_neg = len(pos.heel_strike_times), len(neg.heel_strike_times)
-    if n_pos == n_neg:
-        return pos if _regularity(pos.heel_strike_times) <= \
-                      _regularity(neg.heel_strike_times) else neg
-    return pos if n_pos > n_neg else neg
+    # Second pass at the subject's own cadence. The first pass only needs to
+    # be good enough to estimate the stride; spacing derived from it then
+    # rejects the extra peaks that a fixed floor lets through.
+    if cfg.adaptive_dist_frac and len(first.heel_strike_times) >= 6:
+        from dataclasses import replace
+        stride = float(np.median(np.diff(np.sort(first.heel_strike_times))))
+        if np.isfinite(stride) and stride > 0:
+            spacing = max(cfg.adaptive_dist_frac * stride, cfg.min_peak_dist_s)
+            second = _detect_one_polarity(
+                oriented, t, replace(cfg, min_peak_dist_s=spacing))
+            # Keep it only if it is at least as regular; a subject who really
+            # changes cadence mid-trial should not be forced onto one stride.
+            if (len(second.heel_strike_times) >= 6 and
+                    _regularity(second.heel_strike_times) <=
+                    _regularity(first.heel_strike_times)):
+                return second
+    return first
 
 
 __all__ = [
