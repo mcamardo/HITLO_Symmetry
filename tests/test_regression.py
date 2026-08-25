@@ -350,13 +350,17 @@ def test_gyro_peak_spacing_adapts_to_cadence():
     g, t, truth = _synth_shank_gyro(fs=fs, stride=stride, n_strides=30)
     w = g[:, 2].copy()
     rng = np.random.default_rng(3)
+    # A spurious swing-peak-then-crossing partway through stance. It has to
+    # sit FURTHER than the 0.40 s floor from the real swing peak (or the floor
+    # suppresses it and the fixture proves nothing) but closer than
+    # 0.6 x stride, which is what the adaptive pass rejects it by.
     for c in truth:
-        i = int((c - t[0]) * fs)
-        for lag_s, amp in ((0.30, 0.30), (0.45, 0.22)):
-            j = i + int(lag_s * fs)
-            if 0 <= j < len(w) - 20:
-                k = np.arange(-10, 10)
-                w[j + k] += amp * 300 * np.exp(-0.5 * (k / 4.0) ** 2)
+        i = int((c - t[0] + 0.55) * fs)      # 0.55 s into stance
+        k = np.arange(-int(0.16 * fs), int(0.16 * fs))
+        if i + k[0] < 0 or i + k[-1] >= len(w):
+            continue
+        tau = k / fs
+        w[i + k] += 190.0 * (-tau / 0.07) * np.exp(-0.5 * (tau / 0.07) ** 2) * np.e ** 0.5
     g[:, 2] = w + rng.normal(0, 3, len(w))
 
     base = GyroDetectionConfig(fs=int(fs))
