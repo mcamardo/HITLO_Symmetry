@@ -347,15 +347,7 @@ def _trigno_columns(inlet):
     Reading labels off the resolved info silently yields none, which looks
     exactly like a bridge that forgot to declare them.
     """
-    try:
-        full = inlet.info(timeout=5.0)
-        chans = full.desc().child('channels').child('channel')
-        labels = []
-        while not chans.empty():
-            labels.append(chans.child_value('label').strip().lower())
-            chans = chans.next_sibling()
-    except Exception:
-        return None
+    labels = _trigno_labels(inlet)
     if not labels:
         return None
     out = {}
@@ -2756,21 +2748,53 @@ def _page_sensors_trigno():
         st.code(r.stdout or r.stderr, language=None)
 
 
-def _probe_trigno_stream(want: str) -> dict:
-    """One look at the named LSL stream: shape, rate, host, and inventory."""
+def _trigno_labels(inlet) -> list:
+    """Channel labels for an open inlet, lowercased. [] if none are declared.
+
+    LSL SUBTLETY, and the reason this is a function rather than three inline
+    copies: resolve_streams() returns metadata-LIGHT StreamInfo objects whose
+    desc() is EMPTY. Channel labels are not available there. The full
+    description only arrives after opening an inlet and calling inlet.info().
+    Reading labels off a resolved info silently yields none, which is
+    indistinguishable from a bridge that forgot to declare them -- so the
+    console reported "declares no usable channel labels" against a stream that
+    labels everything correctly.
+    """
     try:
-        from pylsl import resolve_streams
+        full = inlet.info(timeout=5.0)
+        ch = full.desc().child('channels').child('channel')
+        out = []
+        while not ch.empty():
+            out.append(ch.child_value('label').strip().lower())
+            ch = ch.next_sibling()
+        return out
+    except Exception:
+        return []
+
+
+def _probe_trigno_stream(want: str) -> dict:
+    """One look at the named LSL stream: shape, rate, host, and inventory.
+
+    Opens an inlet rather than reading the resolved info, because that is the
+    only place channel labels exist -- see _trigno_labels().
+    """
+    try:
+        from pylsl import resolve_streams, StreamInlet
         for s in resolve_streams(wait_time=3.0):
             if s.name() != want:
                 continue
-            labels = []
+            # NOTE: no own-host filter. The Trigno bridge runs on the Windows
+            # base-station machine by design, so requiring a local stream --
+            # correct for Polar, which pairs over BLE from this Mac -- would
+            # reject the only stream we ever want here.
+            inlet = StreamInlet(s, max_buflen=1)
             try:
-                ch = s.desc().child('channels').child('channel')
-                while not ch.empty():
-                    labels.append(ch.child_value('label').strip().lower())
-                    ch = ch.next_sibling()
-            except Exception:
-                pass
+                labels = _trigno_labels(inlet)
+            finally:
+                try:
+                    inlet.close_stream()
+                except Exception:
+                    pass
             inv = {}
             for lab in labels:
                 for side in ('left', 'right'):
@@ -2779,7 +2803,8 @@ def _probe_trigno_stream(want: str) -> dict:
                                'thigh' if 'thigh' in lab else 'shank')
                         inv.setdefault(side, set()).add(seg)
             return {'n_channels': s.channel_count(), 'srate': s.nominal_srate(),
-                    'host': s.hostname(), 'inventory': {k: sorted(v) for k, v in inv.items()},
+                    'host': s.hostname(),
+                    'inventory': {k: sorted(v) for k, v in inv.items()},
                     'error': None}
         return {'error': f"No stream named '{want}' on the network. Is the "
                          f"bridge running on the base-station machine?"}
