@@ -189,11 +189,26 @@ _ACC_TOKENS = ('acc', 'accel')
 _GYR_TOKENS = ('gyr', 'gyro')
 _AXES = ('x', 'y', 'z')
 
+# Body segments a sensor can be on. 'shank' is the default when a label names
+# no segment, so the original two-sensor labels (left_acc_x) keep working.
+_SEGMENTS = ('shank', 'foot', 'thigh')
+_DEFAULT_SEGMENT = 'shank'
 
-def _match_axis(label: str, side: str,
+
+def _label_segment(label: str) -> str:
+    """Which body segment a channel label refers to."""
+    for seg in _SEGMENTS:
+        if seg in label:
+            return seg
+    return _DEFAULT_SEGMENT
+
+
+def _match_axis(label: str, side: str, segment: str,
                 kind_tokens: Sequence[str]) -> Optional[str]:
-    """Return the axis ('x'/'y'/'z') if `label` is this side+kind, else None."""
+    """Axis ('x'/'y'/'z') if `label` is this side+segment+kind, else None."""
     if not label.startswith(side):
+        return None
+    if _label_segment(label) != segment:
         return None
     if not any(tok in label for tok in kind_tokens):
         return None
@@ -203,20 +218,97 @@ def _match_axis(label: str, side: str,
     return None
 
 
-def _demux(labels: List[str], series: np.ndarray, side: str
+def _demux(labels: List[str], series: np.ndarray, side: str,
+           segment: str = _DEFAULT_SEGMENT
            ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Pull (accel, gyro) as (N,3) for one side out of a multiplexed stream."""
+    """Pull (accel, gyro) as (N,3) for one side+segment out of the stream.
+
+    Raises on an ambiguous label set rather than picking whichever column
+    comes first. Adding a foot sensor labelled 'right_foot_acc_x' alongside a
+    shank sensor labelled 'right_acc_x' would otherwise blend the two
+    silently, in channel order -- the kind of failure that produces entirely
+    plausible numbers from the wrong body segment.
+    """
     def gather(tokens: Sequence[str]) -> Optional[np.ndarray]:
-        cols: Dict[str, int] = {}
+        cols: Dict[str, List[int]] = {}
         for i, lab in enumerate(labels):
-            ax = _match_axis(lab, side, tokens)
-            if ax is not None and ax not in cols:
-                cols[ax] = i
+            ax = _match_axis(lab, side, segment, tokens)
+            if ax is not None:
+                cols.setdefault(ax, []).append(i)
+        dupes = {ax: idxs for ax, idxs in cols.items() if len(idxs) > 1}
+        if dupes:
+            detail = "; ".join(
+                f"{ax}: " + ", ".join(labels[i] for i in idxs)
+                for ax, idxs in dupes.items())
+            raise ValueError(
+                f"ambiguous channel labels for {side} {segment} -- {detail}. "
+                f"Give each sensor a distinct segment in its label "
+                f"(e.g. right_shank_acc_x vs right_foot_acc_x) so they cannot "
+                f"be confused.")
         if len(cols) != 3:
             return None
-        return series[:, [cols['x'], cols['y'], cols['z']]]
+        return series[:, [cols['x'][0], cols['y'][0], cols['z'][0]]]
 
     return gather(_ACC_TOKENS), gather(_GYR_TOKENS)
+
+
+def load_trigno_segment(xdf_path: str,
+                        side: str,
+                        segment: str = _DEFAULT_SEGMENT,
+                        stream_name: str = "TrignoIMU",
+                        ) -> Optional[SensorStream]:
+    """One side+segment out of the multiplexed stream.
+
+    Use for sensors beyond the two shanks -- a foot sensor, for instance,
+    which with its shank counterpart gives ankle angle.
+    """
+    data = _load_xdf(xdf_path)
+    if data is None:
+        return None
+    for stream in data:
+        if stream['info']['name'][0] != stream_name:
+            continue
+        series = np.asarray(stream['time_series'], dtype=np.float64)
+        timestamps = np.asarray(stream['time_stamps'])
+        if len(timestamps) < 2 or series.ndim != 2:
+            return None
+        labels = _channel_labels(stream)
+        if not labels or len(labels) != series.shape[1]:
+            return None
+        acc, gyr = _demux(labels, series, side, segment)
+        if acc is None:
+            return None
+        return SensorStream(
+            accel=acc, timestamps=timestamps,
+            actual_fs=_measured_fs(timestamps),
+            name=f"{stream_name}:{side}_{segment}",
+            gyro=gyr, side=side, backend="trigno")
+    return None
+
+
+def trigno_inventory(xdf_path: str,
+                     stream_name: str = "TrignoIMU") -> Dict[str, List[str]]:
+    """What sensors a Trigno recording actually contains.
+
+    Returns {'left': ['shank'], 'right': ['shank', 'foot'], ...}. Useful for
+    checking a bridge change did what was intended before recording a session
+    on it.
+    """
+    data = _load_xdf(xdf_path)
+    out: Dict[str, List[str]] = {}
+    if data is None:
+        return out
+    for stream in data:
+        if stream['info']['name'][0] != stream_name:
+            continue
+        for lab in _channel_labels(stream):
+            for side in _DEFAULT_SIDES:
+                if lab.startswith(side):
+                    seg = _label_segment(lab)
+                    out.setdefault(side, [])
+                    if seg not in out[side]:
+                        out[side].append(seg)
+    return out
 
 
 def load_trigno_streams(xdf_path: str,
@@ -319,6 +411,8 @@ def live_stream_names(config: Optional[dict] = None) -> List[str]:
 
 __all__ = [
     "SensorStream",
+    "load_trigno_segment",
+    "trigno_inventory",
     "backend_modality",
     "trial_dir",
     "trial_path",
