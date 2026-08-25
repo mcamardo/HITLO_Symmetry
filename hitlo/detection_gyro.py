@@ -37,7 +37,7 @@ against force plates and footswitches.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 
@@ -89,9 +89,22 @@ class GyroDetectionConfig:
     # Set to None to disable the second pass and keep the fixed floor.
     adaptive_dist_frac: Optional[float] = 0.60
 
-    # How far after a swing peak to look for the crossing. Contact follows
-    # the peak closely; a wider window risks catching the next cycle.
-    max_search_s: float = 0.50
+    # How far after a swing peak to look for the crossing, as a FRACTION of
+    # the measured stride. Contact follows the peak by roughly a tenth of a
+    # cycle at normal cadence, but the interval scales with cadence, so a
+    # fixed number cannot serve both.
+    #
+    # This was 0.50 s fixed, which is fine at a 1.45 s stride and fails at
+    # 2.0 s: on a deliberately slowed trial six left swing peaks had no
+    # crossing inside the window because contact had not happened yet. The
+    # events were simply dropped, alternation fell to 61%, and the leg looked
+    # like it was missing strides.
+    max_search_frac: float = 0.45
+    max_search_s: float = 0.50        # floor, and used before stride is known
+
+    # Likewise the reversal window: how long after the crossing the signal is
+    # given to show a genuine reversal.
+    reversal_window_frac: float = 0.12
 
     # Reject a crossing that is not followed by a real reversal — that is
     # drift or a stance wobble rather than foot contact. Expressed as a
@@ -103,7 +116,7 @@ class GyroDetectionConfig:
     # faster has smaller per-sample steps and would fail a fixed slope floor
     # while being identical physically.
     min_reversal_frac: float = 0.08
-    reversal_window_s: float = 0.15
+    reversal_window_s: float = 0.15   # floor, and used before stride is known
 
     def with_fs(self, fs: float) -> "GyroDetectionConfig":
         from dataclasses import replace
@@ -357,8 +370,12 @@ def detect_heelstrikes_gyro(gyro: np.ndarray,
             stride = float(np.median(np.diff(np.sort(first.heel_strike_times))))
         if stride and np.isfinite(stride) and stride > 0:
             spacing = max(cfg.adaptive_dist_frac * stride, cfg.min_peak_dist_s)
+            search = max(cfg.max_search_frac * stride, cfg.max_search_s)
+            revwin = max(cfg.reversal_window_frac * stride, cfg.reversal_window_s)
             second = _detect_one_polarity(
-                oriented, t, replace(cfg, min_peak_dist_s=spacing))
+                oriented, t, replace(cfg, min_peak_dist_s=spacing,
+                                     max_search_s=search,
+                                     reversal_window_s=revwin))
             # Keep it only if it is at least as regular; a subject who really
             # changes cadence mid-trial should not be forced onto one stride.
             if (len(second.heel_strike_times) >= 6 and
@@ -368,9 +385,124 @@ def detect_heelstrikes_gyro(gyro: np.ndarray,
     return first
 
 
+# ===========================================================================
+# Toe-off and gait phases
+#
+# NOT WIRED INTO THE COST FUNCTION. hitlo.cost uses step times only; nothing
+# here reaches the optimizer. This exists so stance- and swing-time symmetry
+# can be compared against step-time symmetry offline, on recordings already
+# collected, before any decision to change what BO optimizes.
+# ===========================================================================
+
+def detect_toe_off_gyro(w: np.ndarray,
+                        heel_strike_indices: np.ndarray,
+                        cfg: GyroDetectionConfig = GyroDetectionConfig(),
+                        ) -> np.ndarray:
+    """Toe-off index within each stride, from oriented sagittal velocity.
+
+    Toe-off is the local MINIMUM immediately preceding the swing peak. After
+    contact the shank rotates backward (deep negative), then forward slowly
+    through mid-stance, dipping once more as the trailing limb unloads before
+    accelerating into swing.
+
+    Chosen empirically over two alternatives, both of which were unusable.
+    Across six leg-conditions from sub-P012, implied stance percentage:
+
+        max acceleration into swing     30.2 - 86.9%   unstable
+        threshold above stance plateau  30.2 - 83.4%   unstable
+        local min before swing peak     49.2 - 62.8%   stable, and centred
+                                                       near the physiological
+                                                       ~60% stance
+
+    DOES NOT CURRENTLY WORK. Do not use these numbers.
+
+    The feature is stable on an AVERAGED gait cycle but not per stride: the
+    minimum lands anywhere along the flat mid-stance plateau, and averaging
+    hid that variance. Measured on sub-P012 normal walking, which is close to
+    symmetric by every other measure, this returns stance of 34.8% of the
+    cycle on the left against 52.8% on the right, and a stance symmetry index
+    of +36.8%. Stance below 50% is not walking at all -- it means more time
+    airborne than grounded.
+
+    Kept because the surrounding plumbing is right and the feature choice is
+    the standard one; what is missing is a way to pin toe-off per stride.
+    That most likely needs either a foot-mounted sensor or a footswitch for
+    ground truth, neither of which the current setup has. gait_phases() warns
+    when the result is physiologically impossible rather than returning it
+    quietly.
+
+    Returns an array the same length as heel_strike_indices; entries are -1
+    where no toe-off could be located in that stride.
+    """
+    w = np.asarray(w, dtype=np.float64)
+    hs = np.asarray(heel_strike_indices, dtype=int)
+    out = np.full(len(hs), -1, dtype=int)
+    if len(hs) < 2:
+        return out
+
+    for j, (i0, i1) in enumerate(zip(hs[:-1], hs[1:])):
+        n = i1 - i0
+        if n < int(0.5 * cfg.fs):
+            continue
+        seg = w[i0:i1]
+        # Swing peak inside this stride, then the last minimum before it.
+        sp = int(np.argmax(seg))
+        lo = int(0.30 * n)          # past the early-stance trough
+        if sp <= lo:
+            continue
+        out[j] = i0 + lo + int(np.argmin(seg[lo:sp]))
+    return out
+
+
+def gait_phases(w: np.ndarray,
+                heel_strike_indices: np.ndarray,
+                time_stamps: np.ndarray,
+                cfg: GyroDetectionConfig = GyroDetectionConfig(),
+                ) -> Dict[str, np.ndarray]:
+    """Stance and swing duration per stride, in seconds.
+
+    stance = heel strike -> toe-off, swing = toe-off -> next heel strike.
+    Strides where toe-off could not be located are dropped.
+    """
+    t = np.asarray(time_stamps, dtype=np.float64)
+    hs = np.asarray(heel_strike_indices, dtype=int)
+    to = detect_toe_off_gyro(w, hs, cfg)
+    stance, swing, stride, frac = [], [], [], []
+    for j in range(len(hs) - 1):
+        if to[j] < 0:
+            continue
+        st = float(t[to[j]] - t[hs[j]])
+        sw = float(t[hs[j + 1]] - t[to[j]])
+        if st <= 0 or sw <= 0:
+            continue
+        stance.append(st); swing.append(sw)
+        stride.append(st + sw); frac.append(100.0 * st / (st + sw))
+    frac_a = np.asarray(frac)
+    # Walking stance is 55-70% of the cycle. Anything outside that means the
+    # toe-off feature was not found, whatever the numbers look like.
+    if len(frac_a) and not (50.0 <= float(np.median(frac_a)) <= 75.0):
+        import warnings as _w
+        _w.warn(
+            f"toe-off detection produced a median stance of "
+            f"{float(np.median(frac_a)):.1f}% of the gait cycle. Walking is "
+            f"55-70%; below 50% would mean more time airborne than grounded. "
+            f"These phase durations are not usable -- see detect_toe_off_gyro.",
+            RuntimeWarning, stacklevel=2)
+
+    return {
+        'stance_s': np.asarray(stance),
+        'swing_s': np.asarray(swing),
+        'stride_s': np.asarray(stride),
+        'stance_pct': frac_a,
+        'toe_off_indices': to,
+    }
+
+
 __all__ = [
     "GyroDetectionConfig",
     "sagittal_velocity",
     "estimate_stride_s",
     "detect_heelstrikes_gyro",
+    "detect_toe_off_gyro",
+    "gait_phases",
 ]
