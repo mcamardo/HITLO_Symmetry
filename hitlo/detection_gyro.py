@@ -241,6 +241,35 @@ def _detect_one_polarity(w: np.ndarray, t: np.ndarray,
     )
 
 
+def estimate_stride_s(w: np.ndarray, fs: float,
+                      lo_s: float = 0.7, hi_s: float = 2.5) -> Optional[float]:
+    """Stride period from the signal's own autocorrelation.
+
+    Deliberately independent of detection. Deriving the stride from detected
+    events instead is circular: if detection is doubling events, the measured
+    interval is half the true stride, and spacing derived from it is useless
+    exactly when it is needed most.
+
+    Returns None if no periodicity is found in the plausible range.
+    """
+    x = np.asarray(w, dtype=np.float64)
+    x = x - x.mean()
+    if len(x) < int(hi_s * fs) * 2:
+        return None
+    ac = np.correlate(x, x, mode='full')[len(x) - 1:]
+    if ac[0] <= 0:
+        return None
+    ac = ac / ac[0]
+    lo, hi = int(lo_s * fs), min(int(hi_s * fs), len(ac) - 1)
+    if hi <= lo:
+        return None
+    k = lo + int(np.argmax(ac[lo:hi]))
+    # A real gait peak is a clear one; anything weaker is noise structure.
+    if ac[k] < 0.2:
+        return None
+    return float(k / fs)
+
+
 def _regularity(times: np.ndarray) -> float:
     """How periodic a set of events is. Lower is better; inf if too few.
 
@@ -320,8 +349,13 @@ def detect_heelstrikes_gyro(gyro: np.ndarray,
     # rejects the extra peaks that a fixed floor lets through.
     if cfg.adaptive_dist_frac and len(first.heel_strike_times) >= 6:
         from dataclasses import replace
-        stride = float(np.median(np.diff(np.sort(first.heel_strike_times))))
-        if np.isfinite(stride) and stride > 0:
+        # Autocorrelation, NOT the detected intervals. If the first pass is
+        # doubling events its median interval is half the true stride, so
+        # spacing derived from it would fail precisely when it is needed.
+        stride = estimate_stride_s(oriented, cfg.fs)
+        if stride is None:
+            stride = float(np.median(np.diff(np.sort(first.heel_strike_times))))
+        if stride and np.isfinite(stride) and stride > 0:
             spacing = max(cfg.adaptive_dist_frac * stride, cfg.min_peak_dist_s)
             second = _detect_one_polarity(
                 oriented, t, replace(cfg, min_peak_dist_s=spacing))
@@ -337,5 +371,6 @@ def detect_heelstrikes_gyro(gyro: np.ndarray,
 __all__ = [
     "GyroDetectionConfig",
     "sagittal_velocity",
+    "estimate_stride_s",
     "detect_heelstrikes_gyro",
 ]
