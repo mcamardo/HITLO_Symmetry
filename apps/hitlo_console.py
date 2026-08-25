@@ -9,7 +9,7 @@ The console shows x for context but leads with the physical values, since x is
 meaningless at the bench.
 
 This is the clinician-facing tool. It:
-  - Shows live Polar H10 streams so you can confirm sensors before each trial
+  - Shows live shank streams (Trigno or Polar) so you can confirm sensors before each trial
   - Runs a BASELINE phase first (no-band "Pre" trials) to measure the
     subject's natural asymmetry, then computes the optimization target
     relative to that baseline
@@ -1722,20 +1722,34 @@ def page_run():
 
     # ---- Live sensors ----
     section_chip("Live monitor")
-    st.subheader("📡 Live Polar H10 — Left + Right Shank")
-    st.caption("Monitoring only. Scanning, assignment and the leg check live on "
-               "the **Sensors** page.")
+    _trigno = _backend() == 'trigno'
+    st.subheader("📡 Live Trigno IMU — Left + Right Shank" if _trigno
+                 else "📡 Live Polar H10 — Left + Right Shank")
+    st.caption(
+        ("Monitoring only, shank accelerometer. Pairing and slot assignment "
+         "live in the Trigno Control Utility; the leg check is on the "
+         "**Sensors** page.") if _trigno else
+        ("Monitoring only. Scanning, assignment and the leg check live on "
+         "the **Sensors** page."))
     connect_to_lsl()
 
     @st.fragment(run_every=5.0)
     def _live():
+        # Liveness probe. On Trigno both sides are the SAME inlet object, so
+        # probe it ONCE -- pulling per side would consume samples the display
+        # pull then never sees, thinning the live trace for no reason.
+        _seen = []
         for side in ['left', 'right']:
             inlet = st.session_state[f'lsl_inlet_{side}']
-            if inlet is not None:
-                try:
-                    inlet.pull_chunk(timeout=0.0, max_samples=1)
-                except Exception:
-                    st.session_state[f'lsl_inlet_{side}'] = None
+            if inlet is None or any(inlet is o for o in _seen):
+                continue
+            _seen.append(inlet)
+            try:
+                inlet.pull_chunk(timeout=0.0, max_samples=1)
+            except Exception:
+                for sd in ['left', 'right']:
+                    if st.session_state[f'lsl_inlet_{sd}'] is inlet:
+                        st.session_state[f'lsl_inlet_{sd}'] = None
         connect_to_lsl()
         sr = st.session_state.config['Cost']['sample_rate']
         cL, cR = st.columns(2)
@@ -1747,7 +1761,10 @@ def page_run():
                     update_live_data(inlet, store, side)
                     st.success(f"{side.capitalize()} · "
                                f"{len(store['time'])} samples")
-                    fig = plot_live_sensor(store, f'polar accel {side}', sr)
+                    fig = plot_live_sensor(
+                        store,
+                        f'{"trigno shank" if _trigno else "polar accel"} {side}',
+                        sr)
                     if fig:
                         st.plotly_chart(fig, width="stretch")
                     else:
