@@ -141,14 +141,22 @@ def check_lsl(cfg_for_streams=None):
         report(BAD, "discovery", "no LSL streams at all — collect_sensors not running?")
         return
 
+    want_names = set(live_stream_names(cfg_for_streams))
+    backend = ((cfg_for_streams or {}).get('Sensing') or {}).get('backend', 'polar')
     mine, foreign = {}, []
     for s in streams:
         host = s.hostname().split('.')[0]
-        if host.lower() == me:
+        # Trigno's bridge is remote by design — match its configured stream
+        # name from any host. Polar's runs locally, so keep the host filter
+        # there to avoid picking up another lab's identically-named stream.
+        remote_ok = backend == 'trigno' and s.name() in want_names
+        if host.lower() == me or remote_ok:
             mine[s.name()] = s
         else:
             foreign.append((s.name(), host))
 
+    # Expected rate follows the hardware: Polar ~200 Hz, Trigno ~148 Hz.
+    nominal = 148.0 if backend == 'trigno' else 200.0
     for want in live_stream_names(cfg_for_streams):
         if want not in mine:
             report(BAD, want, "NOT PRESENT on this machine")
@@ -162,8 +170,9 @@ def check_lsl(cfg_for_streams=None):
         hz = n / 3.0
         if n == 0:
             report(BAD, want, "present but ZERO samples — sensor not sending")
-        elif hz < 150:
-            report(WARN, want, f"only ~{hz:.0f} Hz (expect ~200) — dropping samples")
+        elif hz < 0.75 * nominal:
+            report(WARN, want,
+                   f"only ~{hz:.0f} Hz (expect ~{nominal:.0f}) — dropping samples")
         else:
             report(OK, want, f"~{hz:.0f} Hz")
 

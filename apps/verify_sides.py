@@ -41,7 +41,32 @@ if _cfg.is_file() and 'LSLAPICFG' not in os.environ:
 import numpy as np
 from pylsl import StreamInlet, resolve_streams
 
-WANT = ['polar accel left', 'polar accel right']
+def _sensing():
+    """Backend from the live config; defaults to Polar.
+
+    A missing config file is fine and means Polar. A config that exists but
+    cannot be parsed is NOT fine and says so -- silently defaulting would run
+    the whole check against the wrong backend, which is what a bare except
+    here did until it swallowed a typo in this very function.
+    """
+    path = REPO_ROOT / 'config' / 'exo_symmetry_config.yml'
+    cfg = {}
+    if path.is_file():
+        try:
+            import yaml
+            cfg = yaml.safe_load(path.read_text()) or {}
+        except Exception as e:
+            print(f"  WARNING: could not read {path.name} ({e}); "
+                  f"assuming the Polar backend.")
+    s = dict((cfg or {}).get('Sensing') or {})
+    s.setdefault('backend', 'polar')
+    s.setdefault('stream', 'TrignoIMU')
+    return s
+
+
+SENSING = _sensing()
+WANT = ([SENSING['stream']] if SENSING['backend'] == 'trigno'
+        else ['polar accel left', 'polar accel right'])
 BASELINE_S = 3.0
 SHAKE_S = 5.0
 # The shaken stream must beat the OTHER stream by this ratio within the same
@@ -54,6 +79,44 @@ MIN_SEPARATION = 2.5
 MIN_ACTIVATION = 3.0
 # Baselines this far apart mean the "stand still" window was not still.
 BASELINE_IMBALANCE = 5.0
+
+
+TRIGNO_COLS = None
+
+
+def _trigno_cols(inlet):
+    """Accel column indices per side, from an OPEN inlet's channel labels.
+
+    LSL SUBTLETY: resolve_streams() returns metadata-LIGHT StreamInfo objects
+    with an empty desc, so channel labels are NOT available there. The full
+    description only arrives after opening an inlet and calling inlet.info().
+    Reading labels off the resolved info silently yields none, which looks
+    exactly like a bridge that forgot to declare them.
+    """
+    try:
+        full = inlet.info(timeout=5.0)
+        ch = full.desc().child('channels').child('channel')
+        labels = []
+        while not ch.empty():
+            labels.append(ch.child_value('label').strip().lower())
+            ch = ch.next_sibling()
+    except Exception:
+        return None
+    out = {}
+    for side in ('left', 'right'):
+        cols = {}
+        for i, lab in enumerate(labels):
+            if not lab.startswith(side) or 'foot' in lab or 'thigh' in lab:
+                continue
+            if not any(t in lab for t in ('acc', 'accel')):
+                continue
+            for ax in ('x', 'y', 'z'):
+                if lab.endswith(ax) and ax not in cols:
+                    cols[ax] = i
+        if len(cols) != 3:
+            return None
+        out[side] = [cols['x'], cols['y'], cols['z']]
+    return out
 
 
 def motion(inlet, seconds: float) -> float:
@@ -72,7 +135,28 @@ def motion(inlet, seconds: float) -> float:
 
 
 def measure_both(inlets: dict, seconds: float) -> dict:
-    """Both streams over the same wall-clock window."""
+    """Both sides over the same wall-clock window.
+
+    On Trigno the two sides share ONE inlet, so it is pulled once and split
+    by column. Pulling per side would race, each call consuming samples the
+    other never sees.
+    """
+    if TRIGNO_COLS is not None and inlets['left'] is inlets['right']:
+        inl = inlets['left']
+        inl.flush()
+        mags = {'left': [], 'right': []}
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            chunk, _ = inl.pull_chunk(timeout=0.2, max_samples=256)
+            for smp in chunk:
+                for sd in ('left', 'right'):
+                    cx, cy, cz = TRIGNO_COLS[sd]
+                    if len(smp) > max(cx, cy, cz):
+                        mags[sd].append(
+                            float(np.sqrt(smp[cx]**2 + smp[cy]**2 + smp[cz]**2)))
+        return {sd: (float(np.std(np.asarray(v))) if len(v) >= 10 else float('nan'))
+                for sd, v in mags.items()}
+
     import threading
     out = {}
 
@@ -103,10 +187,28 @@ def main() -> int:
     inlets, foreign = {}, []
     for s in streams:
         host = s.hostname().split('.')[0]
-        if host.lower() != me:
+        # The own-host filter exists to stop another lab's identically-named
+        # stream being used by mistake. It applies to Polar, whose bridge runs
+        # locally. The Trigno bridge runs on the base-station machine BY
+        # DESIGN, so for that backend the configured stream name is matched
+        # from any host -- filtering by host would reject the real stream.
+        remote_ok = (SENSING['backend'] == 'trigno' and
+                     s.name() == SENSING['stream'])
+        if host.lower() != me and not remote_ok:
             foreign.append((s.name(), host))
             continue
-        if s.name() == 'polar accel left':
+        if SENSING['backend'] == 'trigno':
+            if s.name() == SENSING['stream']:
+                inlet = StreamInlet(s, max_buflen=8)
+                cols = _trigno_cols(inlet)
+                if cols is None:
+                    print(f"  '{s.name()}' declares no usable channel labels; "
+                          f"cannot tell left from right.")
+                    continue
+                # ONE inlet feeds both sides; pulling it twice would race.
+                inlets['left'] = inlets['right'] = inlet
+                globals()['TRIGNO_COLS'] = cols
+        elif s.name() == 'polar accel left':
             inlets['left'] = StreamInlet(s, max_buflen=8)
         elif s.name() == 'polar accel right':
             inlets['right'] = StreamInlet(s, max_buflen=8)
@@ -120,8 +222,10 @@ def main() -> int:
 
     missing = [s for s in WANT_SIDES if s not in inlets]
     if missing:
-        print(f"\n  MISSING on this machine: "
-              f"{', '.join('polar accel ' + m for m in missing)}")
+        print(f"\n  MISSING on this machine: {', '.join(missing)}")
+        if SENSING['backend'] == 'trigno':
+            print(f"  Expected the '{SENSING['stream']}' stream from the "
+                  f"bridge on the base-station machine.")
         return 1
     print("  Both shank streams found on this machine.\n")
 
@@ -176,10 +280,16 @@ def main() -> int:
     if not any(results.values()):
         print("\nIf both steps said SWAPPED, the straps are on the wrong legs.")
         print("Fix it in ONE of these ways:")
-        print("  a) physically swap the two straps, or")
-        print("  b) swap left/right in config/sensors.json, then restart BOTH")
-        print("     collect_sensors.py terminals (the stream names are set at")
-        print("     connect time, so a config edit alone changes nothing).")
+        if SENSING['backend'] == 'trigno':
+            print("  On Trigno the side comes from the BRIDGE's slot-to-label")
+            print("  mapping, not from anything on this machine. Either swap the")
+            print("  sensors physically, or fix the mapping in the bridge on the")
+            print("  base-station machine and restart it.")
+        else:
+            print("  a) physically swap the two straps, or")
+            print("  b) swap left/right in config/sensors.json, then restart BOTH")
+            print("     collect_sensors.py terminals (the stream names are set at")
+            print("     connect time, so a config edit alone changes nothing).")
     print("\nThen re-run this check.")
     return 1
 
