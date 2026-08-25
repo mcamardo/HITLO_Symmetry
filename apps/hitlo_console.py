@@ -85,7 +85,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from hitlo.hil_exo import HIL_Exo
 from hitlo.cost import SymmetryCost
 from hitlo.detection import detect_heelstrikes_full, DetectionConfig
-from hitlo.io import load_both_polar_streams, trial_filename
+from hitlo.detectors import detect as detect_strikes
+from hitlo.io import (load_both_polar_streams, load_streams,
+                      trial_filename, backend_modality)
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index, trim_peaks,
 )
@@ -249,7 +251,24 @@ def delete_checkpoint(config) -> None:
 # LSL live streaming
 # ===========================================================================
 
+def _backend() -> str:
+    cfg = st.session_state.get('config') or {}
+    return (cfg.get('Sensing') or {}).get('backend', 'polar')
+
+
 def connect_to_lsl() -> bool:
+    """Attach live inlets for whichever backend the config selects.
+
+    The two backends differ structurally, not just in stream name:
+
+      polar    TWO streams, one per side, resolved by name
+      trigno   ONE stream carrying both sides, demultiplexed by channel label
+
+    For Trigno both session_state inlets point at the SAME inlet object and
+    the side split happens per-sample in update_live_data, using column
+    indices worked out once at connect time. Pulling the same inlet twice
+    would race — each pull consumes samples the other will never see.
+    """
     if (st.session_state.lsl_inlet_left is not None and
             st.session_state.lsl_inlet_right is not None):
         return True
@@ -261,21 +280,107 @@ def connect_to_lsl() -> bool:
         # healthy, and the caller then reports SENSOR DISCONNECTED for sensors
         # that never dropped a sample.
         streams = resolve_streams(wait_time=3.0)
-        for s in streams:
-            if s.name() == 'polar accel left' and st.session_state.lsl_inlet_left is None:
-                st.session_state.lsl_inlet_left = StreamInlet(s)
-            if s.name() == 'polar accel right' and st.session_state.lsl_inlet_right is None:
-                st.session_state.lsl_inlet_right = StreamInlet(s)
+
+        if _backend() == 'trigno':
+            want = ((st.session_state.get('config') or {}).get('Sensing')
+                    or {}).get('stream', 'TrignoIMU')
+            for s in streams:
+                if s.name() != want:
+                    continue
+                cols = _trigno_columns(s)
+                if cols is None:
+                    # No usable labels. Refuse rather than guess a column
+                    # order: guessing wrong swaps the legs, which inverts the
+                    # sign of the symmetry index while looking plausible.
+                    st.session_state.trigno_label_error = (
+                        f"'{want}' declares no usable channel labels. Expected "
+                        f"left_acc_x ... right_gyr_z. Cannot split left from "
+                        f"right without them.")
+                    return False
+                inlet = StreamInlet(s)
+                st.session_state.trigno_cols = cols
+                st.session_state.trigno_label_error = None
+                st.session_state.lsl_inlet_left = inlet
+                st.session_state.lsl_inlet_right = inlet
+                break
+        else:
+            for s in streams:
+                if s.name() == 'polar accel left' and st.session_state.lsl_inlet_left is None:
+                    st.session_state.lsl_inlet_left = StreamInlet(s)
+                if s.name() == 'polar accel right' and st.session_state.lsl_inlet_right is None:
+                    st.session_state.lsl_inlet_right = StreamInlet(s)
     except Exception:
         pass
     return (st.session_state.lsl_inlet_left is not None and
             st.session_state.lsl_inlet_right is not None)
 
 
-def update_live_data(inlet, store) -> None:
+def _trigno_columns(stream_info):
+    """Column indices for each side's accel in a multiplexed Trigno stream.
+
+    Returns {'left': [x,y,z], 'right': [x,y,z]} or None if the labels are
+    absent or incomplete. Accel only — the live plot shows acceleration for
+    both backends so the display stays comparable.
+    """
+    try:
+        chans = stream_info.desc().child('channels').child('channel')
+        labels = []
+        while not chans.empty():
+            labels.append(chans.child_value('label').strip().lower())
+            chans = chans.next_sibling()
+    except Exception:
+        return None
+    if not labels:
+        return None
+    out = {}
+    for side in ('left', 'right'):
+        cols = {}
+        for i, lab in enumerate(labels):
+            if not lab.startswith(side):
+                continue
+            if not any(tok in lab for tok in ('acc', 'accel')):
+                continue
+            for ax in ('x', 'y', 'z'):
+                if lab.endswith(ax) and ax not in cols:
+                    cols[ax] = i
+        if len(cols) != 3:
+            return None
+        out[side] = [cols['x'], cols['y'], cols['z']]
+    return out
+
+
+def update_live_data(inlet, store, side: str = None) -> None:
+    """Pull live samples into a display buffer.
+
+    On Trigno both sides share ONE inlet, so a single pull has to feed both
+    buffers — pulling twice would race, with each call consuming samples the
+    other never sees. When `side` is given and columns are known, the caller
+    is on the shared-inlet path and this fills both stores from one pull.
+    """
     if inlet is None:
         return
+    cols = st.session_state.get('trigno_cols')
     try:
+        if cols and _backend() == 'trigno':
+            if side not in (None, 'left'):
+                return          # the 'left' call already filled both
+            samples, timestamps = inlet.pull_chunk(timeout=0.0, max_samples=100)
+            if not samples:
+                return
+            for sd in ('left', 'right'):
+                store_sd = st.session_state[f'live_data_{sd}']
+                cx, cy, cz = cols[sd]
+                for i, sample in enumerate(samples):
+                    store_sd['time'].append(timestamps[i])
+                    store_sd['x'].append(sample[cx])
+                    store_sd['y'].append(sample[cy])
+                    store_sd['z'].append(sample[cz])
+                mx = st.session_state.max_live_points
+                for key in store_sd:
+                    if len(store_sd[key]) > mx:
+                        store_sd[key] = store_sd[key][-mx:]
+            return
+
         samples, timestamps = inlet.pull_chunk(timeout=0.0, max_samples=100)
         if samples:
             for i, sample in enumerate(samples):
@@ -305,7 +410,10 @@ def initialize_system(fresh_start: bool = False) -> Tuple[bool, bool]:
     subject = config['Subject']['id']
     session = config['Subject']['session']
     base_dir = config['Subject']['base_dir']
-    eeg_dir = os.path.join(base_dir, f"sub-{subject}", f"ses-{session}", "eeg")
+    # 'eeg' for Polar (an artefact of the original LabRecorder template),
+    # 'motion' for Trigno, which is what BIDS specifies for IMU data.
+    eeg_dir = os.path.join(base_dir, f"sub-{subject}", f"ses-{session}",
+                           backend_modality(config))
 
     deriv_base = os.path.join(base_dir, f"sub-{subject}", f"ses-{session}",
                               "derivatives", "hil_optimization")
@@ -422,7 +530,8 @@ def baseline_filename(run_num: int) -> str:
     config = st.session_state.config
     return trial_filename(config['Subject']['id'],
                           config['Subject']['session'],
-                          run_num, task=BASELINE_TASK)
+                          run_num, task=BASELINE_TASK,
+                          modality=backend_modality(config))
 
 
 def baseline_file_exists(run_num: int) -> bool:
@@ -536,6 +645,7 @@ def check_file_exists(trial_num: int) -> bool:
         st.session_state.config['Subject']['id'],
         st.session_state.config['Subject']['session'],
         trial_num,
+        modality=backend_modality(st.session_state.config),
     )
     return os.path.exists(os.path.join(trial_dir, fname))
 
@@ -544,7 +654,7 @@ def analyze_current_trial() -> bool:
     trial_num = st.session_state.current_trial + 1
     config = st.session_state.config
     fname = trial_filename(config['Subject']['id'], config['Subject']['session'],
-                           trial_num)
+                           trial_num, modality=backend_modality(config))
 
     if not check_file_exists(trial_num):
         st.error(f"File not found: {fname}")
@@ -614,7 +724,8 @@ def analyze_current_trial() -> bool:
         subject = config['Subject']['id']
         session = config['Subject']['session']
         base_dir = config['Subject']['base_dir']
-        save_dir = os.path.join(base_dir, f"sub-{subject}", f"ses-{session}", "eeg")
+        save_dir = os.path.join(base_dir, f"sub-{subject}", f"ses-{session}",
+                                backend_modality(config))
         save_path = os.path.join(
             save_dir, f"sub-{subject}_ses-{session}_hil_results.csv")
         tmp_path = save_path + '.tmp'
@@ -869,12 +980,15 @@ def analyze_trial_for_qc(xdf_path: str, cfg: DetectionConfig,
                          trim_seconds: float) -> dict:
     """Full trial analysis for QC display. Uses the SAME detection pipeline
     as the BO cost function, so what you see is what got scored."""
-    left, right = load_both_polar_streams(xdf_path)
+    # Backend-aware: the QC plot must read Trigno recordings too,
+    # otherwise it silently shows nothing for a valid trial.
+    left, right = load_streams(xdf_path, st.session_state.get('config'))
     if left is None or right is None:
         return None
 
-    left_result = detect_heelstrikes_full(left.accel, left.timestamps, cfg=cfg)
-    right_result = detect_heelstrikes_full(right.accel, right.timestamps, cfg=cfg)
+    conf = st.session_state.get('config')
+    left_result = detect_strikes(left, conf, cfg=cfg)
+    right_result = detect_strikes(right, conf, cfg=cfg)
 
     trial_start = min(left.timestamps[0], right.timestamps[0])
     trial_end = max(left.timestamps[-1], right.timestamps[-1])
@@ -1605,7 +1719,7 @@ def page_run():
             store = st.session_state[f'live_data_{side}']
             with col:
                 if inlet is not None:
-                    update_live_data(inlet, store)
+                    update_live_data(inlet, store, side)
                     st.success(f"{side.capitalize()} · "
                                f"{len(store['time'])} samples")
                     fig = plot_live_sensor(store, f'polar accel {side}', sr)
@@ -1844,7 +1958,8 @@ def _optimization_phase(config, signed):
         st.markdown("---")
         last = st.session_state.results[-1]['trial']
         fn = trial_filename(config['Subject']['id'],
-                            config['Subject']['session'], last)
+                            config['Subject']['session'], last,
+                            modality=backend_modality(config))
         fp = os.path.join(st.session_state.cost_extractor.trial_data_dir, fn)
         trim_s = config['Cost'].get('trim_seconds', 3.0)
         cfg = st.session_state.cost_extractor.detection_cfg

@@ -415,6 +415,78 @@ def test_gyro_timing_bias_is_common_mode():
     return f"identical L/R waveforms give SI={si:+.2f}% (bias cancels)"
 
 
+TRIGNO_DIR = Path("/Users/maccamardo/HITLO_Data/sub-P012/ses-S001/motion")
+
+
+def test_both_backends_run_end_to_end():
+    """Polar and Trigno must both work through the same cost function.
+
+    The point of the migration was that the optimizer should not care which
+    sensor produced the events. This pins that: same SymmetryCost, two
+    configs, two file layouts (eeg/ vs motion/), two detectors.
+    """
+    from hitlo.cost import SymmetryCost
+    from hitlo.io import trial_dir, trial_filename, backend_modality
+
+    results = {}
+
+    # Polar — must still return exactly the historical value.
+    pc = {'Subject': {'id': 'P062', 'session': 'S001',
+                      'base_dir': '/Users/maccamardo/HITLO_Data'},
+          'Sensing': {'backend': 'polar'}, 'Cost': {}}
+    if REAL_XDF.is_file():
+        c = SymmetryCost(trial_data_dir=str(trial_dir(pc)), subject_id='P062',
+                         session='S001', signed=True, si_target=-3.0,
+                         trim_seconds=3.0, config=pc)
+        a = c.analyze_trial(
+            trial_num=2,
+            filename=trial_filename('P062', 'S001', 2, task='Pre',
+                                    modality=backend_modality(pc)),
+            verbose=False)
+        assert a is not None, f"polar path failed: {c.last_failure}"
+        assert abs(a.symmetry_index - EXPECTED_SI) < 0.5, (
+            f"polar SI drifted to {a.symmetry_index:+.2f}%")
+        results['polar'] = a.symmetry_index
+
+    # Trigno — the validation set, where the manipulation is known.
+    tc = {'Subject': {'id': 'P012', 'session': 'S001',
+                      'base_dir': '/Users/maccamardo/HITLO_Data'},
+          'Sensing': {'backend': 'trigno', 'detector': 'gyro',
+                      'stream': 'TrignoIMU'}, 'Cost': {}}
+    if not TRIGNO_DIR.is_dir():
+        if not results:
+            return "SKIPPED — no reference recordings on this machine"
+        return f"polar {results['polar']:+.2f}%; trigno recordings absent"
+
+    c = SymmetryCost(trial_data_dir=str(trial_dir(tc)), subject_id='P012',
+                     session='S001', signed=True, si_target=-3.0,
+                     trim_seconds=3.0, config=tc)
+    got = {}
+    for run in (2, 7, 8):
+        fn = trial_filename('P012', 'S001', run,
+                            modality=backend_modality(tc))
+        if not (TRIGNO_DIR / fn).is_file():
+            continue
+        a = c.analyze_trial(trial_num=run, filename=fn, verbose=False)
+        assert a is not None, f"trigno run {run} failed: {c.last_failure}"
+        got[run] = a.symmetry_index
+
+    # The known manipulation: run 7 limped on the right, run 8 on the left.
+    # Limping right shortens right stance, so the left foot lands sooner
+    # after the right -> left step SHORT, right step LONG -> SI positive.
+    if {2, 7, 8} <= set(got):
+        assert got[7] > got[2], (
+            f"right-limp trial should exceed baseline: "
+            f"{got[7]:+.2f}% vs {got[2]:+.2f}%")
+        assert got[8] < got[2], (
+            f"left-limp trial should fall below baseline: "
+            f"{got[8]:+.2f}% vs {got[2]:+.2f}%")
+        return (f"polar {results.get('polar', float('nan')):+.2f}%; trigno "
+                f"normal {got[2]:+.2f}%, limp-R {got[7]:+.2f}%, "
+                f"limp-L {got[8]:+.2f}% (signs correct)")
+    return f"trigno ran on {len(got)} recording(s)"
+
+
 def test_real_recording_end_to_end():
     """The actual file that failed today must now analyze cleanly."""
     if not REAL_XDF.is_file():

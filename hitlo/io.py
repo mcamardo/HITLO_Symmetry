@@ -31,14 +31,48 @@ import numpy as np
 # Trial file naming (BIDS-ish convention used throughout the project)
 # ===========================================================================
 
+# BIDS modality per backend. Polar recordings were filed under 'eeg' (an
+# artefact of the LabRecorder template used at the time, not a claim about
+# the data); Trigno IMU recordings are filed under 'motion', which is what
+# BIDS actually specifies for them. Both must keep working: existing sessions
+# are full of eeg-suffixed files.
+_MODALITY = {'polar': 'eeg', 'trigno': 'motion'}
+
+
+def backend_modality(config: Optional[dict] = None) -> str:
+    """'eeg' or 'motion' — the BIDS modality this backend records under."""
+    return _MODALITY.get(sensing_config(config).get('backend'), 'eeg')
+
+
 def trial_filename(subject: str, session: str, run: int,
-                   task: str = "Default") -> str:
+                   task: str = "Default",
+                   modality: str = "eeg") -> str:
     """BIDS-style XDF filename for a trial.
 
-    Example: trial_filename("P048", "S001", 7)
-             -> "sub-P048_ses-S001_task-Default_run-007_eeg.xdf"
+    trial_filename("P048", "S001", 7)
+        -> "sub-P048_ses-S001_task-Default_run-007_eeg.xdf"
+    trial_filename("P012", "S001", 7, modality="motion")
+        -> "sub-P012_ses-S001_task-Default_run-007_motion.xdf"
+
+    `modality` defaults to 'eeg' so every existing caller is unaffected.
     """
-    return f"sub-{subject}_ses-{session}_task-{task}_run-{run:03d}_eeg.xdf"
+    return (f"sub-{subject}_ses-{session}_task-{task}_run-{run:03d}"
+            f"_{modality}.xdf")
+
+
+def trial_dir(config: dict) -> "Path":
+    """Directory this backend's recordings live in, per BIDS modality."""
+    from pathlib import Path
+    subj = config['Subject']
+    return (Path(subj['base_dir']) / f"sub-{subj['id']}" /
+            f"ses-{subj['session']}" / backend_modality(config))
+
+
+def trial_path(config: dict, run: int, task: str = "Default") -> "Path":
+    """Full path to a trial recording, correct for the configured backend."""
+    return trial_dir(config) / trial_filename(
+        config['Subject']['id'], config['Subject']['session'], run, task,
+        modality=backend_modality(config))
 
 
 # ===========================================================================
@@ -285,6 +319,9 @@ def live_stream_names(config: Optional[dict] = None) -> List[str]:
 
 __all__ = [
     "SensorStream",
+    "backend_modality",
+    "trial_dir",
+    "trial_path",
     "PolarStream",
     "trial_filename",
     "load_polar_stream",
