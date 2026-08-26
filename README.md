@@ -71,6 +71,7 @@ The console's **Sensors** page adapts to the backend in your config:
 Standalone tools, if you prefer the terminal:
 
 ```bash
+./apps/dry_run.py               # practise a session with no hardware
 streamlit run apps/trial_explorer.py   # browse recordings and detection
 ./apps/preflight.py             # pre-session readiness check
 ./apps/verify_sides.py          # confirm which stream is which leg
@@ -104,6 +105,7 @@ HITLO_Symmetry/
 │   ├── preflight.py               # pre-session readiness check
 │   ├── verify_sides.py            # confirm stream-to-leg mapping
 │   ├── trial_explorer.py          # browse any recording, interactively
+│   ├── dry_run.py                 # whole optimization, simulated, no hardware
 │   ├── diagnose_trial.py          # standalone trial QC plotter
 │   ├── compare_detectors.py       # accel vs gyro on one recording
 │   ├── check_placement.py         # compare sensor mountings empirically

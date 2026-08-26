@@ -320,6 +320,61 @@ def test_gyro_detector_finds_known_contacts():
     return f"all contacts recovered in 6 regimes, worst median error {worst:.1f} ms"
 
 
+def test_gp_kernel_constraint_survives_a_fit():
+    """The lengthscale bound must still hold after BO fits the model.
+
+    Guards the bug that made Bayesian optimization behave as random search.
+    _constrain_kernel used to assign BO.kernel.covar_module directly, but
+    BO.run() calls kernel.reset() before every fit, and reset() rebuilds
+    covar_module from kernel.length_scale_constraints -- the Interval(0, 10)
+    set in SE.__init__. The override was discarded on the first fit of every
+    session, so the constraint was never once active during BO.
+
+    Unconstrained, the GP fitted lengthscale ~8.3 on a [0, 1] axis with noise
+    ~1.07 against standardized targets: it explained the data as pure noise.
+    The posterior mean came out flat to three decimals and the acquisition was
+    near-uniform. In simulation with a known optimum at x = +0.067 it settled
+    on x = +1.000, the far end of the range.
+
+    Checking the attribute is not enough -- that is exactly what looked right
+    before. This fits the model the way the console does and reads the
+    lengthscale back off the fitted GP.
+    """
+    import yaml
+    cfg = _load_config()
+    try:
+        from hitlo.hil_exo import HIL_Exo
+        import torch  # noqa: F401
+    except ImportError as e:
+        return f"skipped: {e}"
+
+    class _Stub:
+        cost_name = "test"
+        si_target = float(cfg["Cost"].get("si_target", 0.0))
+
+    hil = HIL_Exo(cfg, _Stub())
+    hil.si_target = _Stub.si_target
+    hil._generate_initial_parameters()
+
+    rng = np.random.default_rng(0)
+    truth = lambda x: -5.0 + 14.0 * np.tanh(1.8 * np.asarray(x))
+    n_ramp = min(5, len(hil.x))
+    for i in range(n_ramp):
+        x = float(hil.x[i, 0])
+        y = float(truth(x) + rng.normal(0, 1.5))
+        hil.x_opt = np.array([[x]]) if i == 0 else np.concatenate((hil.x_opt, [[x]]))
+        hil.y_opt = np.array([y]) if i == 0 else np.concatenate((hil.y_opt, [y]))
+
+    yn = hil._mean_normalize_y(hil.y_opt)
+    hil.BO.run(hil._normalize_x(hil.x_opt).reshape(len(hil.x_opt), -1),
+               yn.reshape(len(hil.x_opt), 1))
+    ls = float(hil.BO.model.covar_module.base_kernel.lengthscale.item())
+    assert 0.05 <= ls <= 1.0 + 1e-6, (
+        f"fitted lengthscale {ls:.3f} is outside [0.05, 1.0] -- the constraint "
+        f"did not survive kernel.reset() inside BO.run()")
+    return f"lengthscale {ls:.3f} still inside [0.05, 1.0] after a real fit"
+
+
 def test_session_calibration_reuse_is_exact_and_guarded():
     """Capturing a calibration once and reusing it must reproduce the direct
     path exactly, and must refuse a sensor it did not come from.
