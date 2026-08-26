@@ -320,6 +320,46 @@ def test_gyro_detector_finds_known_contacts():
     return f"all contacts recovered in 6 regimes, worst median error {worst:.1f} ms"
 
 
+def test_gyro_axis_is_measured_not_assumed():
+    """The sagittal axis identifies itself; a pinned wrong axis warns.
+
+    This defaulted to z, which is correct for a shank sensor mounted the way
+    ours happen to be and wrong for anything else -- a foot sensor in the same
+    recording resolves to x. The failure is silent: the detector reads a
+    mostly-flat channel, finds peaks in noise, and returns events that look
+    like clean periodic detection.
+
+    Builds the same walking signal on each of the three axes in turn and
+    requires identical contact times from all three.
+    """
+    import warnings as _w
+    from hitlo.detection_gyro import GyroDetectionConfig, detect_heelstrikes_gyro
+    cfg = GyroDetectionConfig(fs=148)
+    base, t, truth = _synth_shank_gyro(stance_frac=0.35)
+    w = base[:, 2].copy()
+    rng = np.random.default_rng(11)
+    found = {}
+    for ax in (0, 1, 2):
+        g = rng.normal(0, 3.0, base.shape)      # quiet noise on the other axes
+        g[:, ax] = w
+        det = np.asarray(detect_heelstrikes_gyro(g, t, cfg=cfg).heel_strike_times)
+        assert len(det) == len(truth), (
+            f"signal on axis {'xyz'[ax]}: found {len(det)} of {len(truth)}")
+        err = np.median([abs(det[np.argmin(np.abs(det - c))] - c) * 1000
+                         for c in truth])
+        assert err < 10.0, f"axis {'xyz'[ax]}: {err:.1f} ms from truth"
+        found['xyz'[ax]] = err
+    # pinning the wrong axis must complain rather than fail quietly
+    g = rng.normal(0, 3.0, base.shape); g[:, 0] = w
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        detect_heelstrikes_gyro(g, t, cfg=GyroDetectionConfig(fs=148, sagittal_axis=1))
+    assert any("sagittal_axis" in str(c.message) for c in caught), (
+        "pinning the wrong sagittal axis produced no warning")
+    return (f"found on all three axes (worst {max(found.values()):.1f} ms); "
+            f"wrong pin warns")
+
+
 def test_foot_sensor_side_check_catches_a_swap():
     """A foot swings with the shank above it, not the one across from it.
 

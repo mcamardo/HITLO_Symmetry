@@ -59,9 +59,18 @@ class GyroDetectionConfig:
     fs: int = 148                     # Trigno Avanti default
 
     # Which gyro column is the sagittal axis (rotation about the medio-lateral
-    # axis). Depends on how the sensor is mounted, so it is configurable and
-    # the sign is resolved automatically below.
-    sagittal_axis: int = 2            # 0=x, 1=y, 2=z
+    # axis). None means MEASURE it: during walking the sagittal axis carries
+    # far more variance than the other two, so it identifies itself.
+    #
+    # This used to default to 2 (z), which is right for a shank sensor mounted
+    # the way ours happen to be and wrong for anything else -- a foot sensor in
+    # the same recording resolves to x. A fixed axis fails silently: the
+    # detector reads a mostly-flat channel, finds peaks in noise, and returns
+    # events that look like a clean periodic detection.
+    #
+    # Set an int (0/1/2) to pin it; a warning is issued if the pinned axis is
+    # not the dominant one.
+    sagittal_axis: Optional[int] = None
 
     # Sign convention. Gyro polarity depends on mounting orientation, so by
     # default the direction of swing is inferred from the data instead of
@@ -163,12 +172,27 @@ def sagittal_velocity(gyro: np.ndarray,
     gait cycle, so whichever polarity holds the extreme values is swing.
     """
     g = np.asarray(gyro, dtype=np.float64)
-    if g.ndim != 2 or g.shape[1] <= cfg.sagittal_axis:
-        raise ValueError(
-            f"gyro must be (N, 3) with a column {cfg.sagittal_axis}; "
-            f"got shape {g.shape}")
+    if g.ndim != 2 or g.shape[1] < 3:
+        raise ValueError(f"gyro must be (N, 3); got shape {g.shape}")
 
-    w = g[:, cfg.sagittal_axis]
+    sd = g.std(axis=0)
+    measured = int(np.argmax(sd))
+    if cfg.sagittal_axis is None:
+        axis = measured
+    else:
+        axis = int(cfg.sagittal_axis)
+        if axis >= g.shape[1]:
+            raise ValueError(f"sagittal_axis {axis} out of range for shape {g.shape}")
+        if axis != measured and sd[measured] > 1.2 * sd[axis]:
+            warnings.warn(
+                f"sagittal_axis is pinned to {'xyz'[axis]} (sd {sd[axis]:.0f} "
+                f"deg/s) but {'xyz'[measured]} carries far more rotation "
+                f"(sd {sd[measured]:.0f}). If the sensor is mounted differently "
+                f"than expected, detection will run on a near-flat channel and "
+                f"find peaks in noise. Leave sagittal_axis unset to measure it.",
+                RuntimeWarning, stacklevel=2)
+
+    w = g[:, axis]
     if not np.all(np.isfinite(w)):
         n_bad = int((~np.isfinite(w)).sum())
         raise ValueError(
