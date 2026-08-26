@@ -88,7 +88,14 @@ class DetectionConfig:
 
     # Peak detection thresholds (in units of jerk z-score standard deviations)
     strict_thresh: float = 1.3     # primary pass: catches most events
-    recovery_thresh: float = 1.8    # fallback pass: fills anomalous gaps
+    # Fallback pass for anomalously long gaps. MUST be BELOW strict_thresh to
+    # do anything: a peak clearing 1.8 would already have been found at 1.3,
+    # so the recovery stage is inert at this value and recovered 0 peaks
+    # across all 8 Trigno trials in sub-P012/ses-S001. Left inert on purpose
+    # -- lowering it to 0.4-1.0 does recover peaks, but they are mostly noise:
+    # per-stride SI scatter rose from 14.8 to 20.8. See _recover_missed_peaks
+    # for why the stage is misconceived at this point in the pipeline.
+    recovery_thresh: float = 1.8
     gap_multiplier: float = 1.7     # a gap > this × median is "anomalously long"
     min_peak_dist_s: float = 0.10   # minimum separation between candidate peaks
 
@@ -265,9 +272,29 @@ def _recover_missed_peaks(jerk_z: np.ndarray,
                           ) -> Tuple[np.ndarray, np.ndarray]:
     """Look for missed peaks in anomalously long gaps.
 
-    If gait is rhythmic and we see a gap > GAP_MULTIPLIER × median, there
-    probably was a real heel strike there whose jerk happened to fall below
-    the strict threshold. We search that gap with a lower threshold.
+    KNOWN LIMITATION -- this stage does nothing at the default settings, and
+    would not work well even if enabled.
+
+    Two problems. First, cfg.recovery_thresh (1.8) is ABOVE cfg.strict_thresh
+    (1.3), so any peak it could find was already found; it recovers nothing.
+    Second, and the reason that default has not simply been lowered: this runs
+    on RAW JERK CANDIDATES, before clustering. Those are several per stride at
+    0.10 s minimum separation, so "median interval" here is the gap between
+    candidates (~0.9 s on P012), not the stride time (~1.44 s). Its notion of
+    an "anomalously long gap" is therefore not about missing heel strikes at
+    all, and lowering the threshold fills normal inter-cluster gaps with noise.
+
+    Filling gaps in the FINAL heel-strike list instead does find genuinely
+    missed strikes (orphans versus the gyro detector fell 27 -> 14 across the
+    session) but is not safe as a default: on run-004 it moved SI from -23.0%
+    to -9.7% and raised per-stride scatter from 27.7 to 36.5. It helps some
+    trials and destroys others, so it is not enabled.
+
+    The underlying issue is not tunable anyway. At 148 Hz a heel-strike impact
+    is ~2 samples wide and its sampled amplitude varies 2.7x between strides;
+    a soft strike registers ~1.2 g against a ~1.0 g walking baseline. No
+    threshold separates that from noise. Prefer the gyro detector, whose
+    mid-swing feature spans ~39 samples.
 
     This is preferable to interpolating a "fake" peak because we require
     actual signal evidence — if no peak ≥ recovery_thresh exists in the gap,
