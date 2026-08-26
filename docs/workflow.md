@@ -1,99 +1,131 @@
 # Experiment workflow
 
-This is the step-by-step procedure for running a HITLO session.
+Step-by-step procedure for running a HITLO session. Everything routes through
+the console — `streamlit run apps/hitlo_console.py` — which adapts to the
+sensor backend set in `config/exo_symmetry_config.yml`.
+
+```yaml
+Sensing:
+  backend: trigno      # or: polar
+  detector: gyro       # or: accel
+  stream: TrignoIMU    # trigno only — the LSL stream the bridge publishes
+```
+
+The backend also decides where trials are written: `motion/` for Trigno,
+`eeg/` for Polar (an artefact of the original LabRecorder template, kept so
+existing recordings still load).
+
+---
 
 ## Before the participant arrives
 
-1. **Charge both Polar H10 sensors** overnight.
-2. **Apply the Coban wrap** to the right sensor (wraps around the shank for reliable skin contact).
-3. **Verify sensor IDs in config**:
-   ```yaml
-   # config/exo_symmetry_config.yml
-   sensors:
-     left_id:  "7F302C25"
-     right_id: "80AE3629"
+**Both backends**
+
+1. Confirm `Subject.id` and `Subject.session` in the config. Using a subject ID
+   that already has recordings will interleave new trials with old ones.
+2. Run the readiness check:
+   ```bash
+   ./apps/preflight.py
    ```
-4. **Open 3 terminal windows**.
+   It verifies the config, the data directory, the index table, LSL streams and
+   the most recent recording. Fix anything it flags before the participant is on
+   the treadmill.
 
-## Sensor startup
+**Trigno**
 
-In order — left before right OR right before left, but each fully connected before starting the next.
+3. Power the sensors and confirm them in the Trigno Control Utility on the
+   base-station machine, then start the bridge that publishes the LSL stream.
+4. In the console's **Sensors** page, run *Look for the stream*. You want the
+   expected channel count, a rate near 148 Hz, and both `left_shank` and
+   `right_shank` listed in the inventory. Extra segments (foot, thigh) are
+   carried but unused by the cost function.
 
-**Terminal 1:**
-```bash
-cd ~/HITLO
-python apps/collect_sensors.py right
-```
-Wait for the `connected` message.
+**Polar**
 
-**Terminal 2:**
-```bash
-python apps/collect_sensors.py left
-```
-Wait for `connected`.
+3. Charge both H10 straps overnight; apply Coban wrap for skin contact.
+4. In the console's **Sensors** page, scan, assign sides, and start one process
+   per sensor.
 
-**LabRecorder:**
-1. Open LabRecorder
-2. Click **Update** — you should see `polar accel left` and `polar accel right`
-3. Check both boxes
-4. Set save directory to `data/sub-<ID>/ses-<SESSION>/eeg/`
-5. Filename template: `sub-<ID>_ses-<SESSION>_task-Default_run-<TRIAL>_eeg.xdf`
+---
 
 ## Participant setup
 
-1. Attach both Polar H10 sensors to the shanks (bottom of the muscle belly, just above the medial malleolus).
-2. The right sensor goes inside the Coban wrap.
-3. Attach the LegExoNET exoskeleton.
-4. Verify in the experiment UI that both sensors are streaming (live plots visible).
+1. Mount the shank sensors just above the medial malleolus, at the bottom of
+   the muscle belly, one per leg.
+2. Attach the LegExoNET exoskeleton.
+3. **Confirm which stream is which leg.** Sensors get swapped between sessions,
+   and a swap inverts the sign of the symmetry index while producing entirely
+   plausible numbers. Use the console's shake test, or:
+   ```bash
+   ./apps/verify_sides.py
+   ```
+4. Watch the live plots for a few strides before starting.
+
+---
 
 ## Running trials
 
-**Terminal 3:**
-```bash
-streamlit run apps/run_experiment.py
-```
-
 For each trial:
 
-1. UI shows the next `(R, L₀)` to set. **Read these carefully** — they're in meters.
-2. Physically adjust the exoskeleton to those values.
-3. In LabRecorder, click **Start**.
-4. Participant walks for the trial duration (90 s default).
-5. Click **Stop** in LabRecorder.
-6. Click **Analyze Trial** in the UI.
-7. Review the QC plot. If warnings appear (red 🚨 banners), pause and investigate before accepting the trial.
-8. The BO will automatically suggest the next `(R, L₀)`.
+1. The console shows the next index value `x` and the four device settings it
+   resolves to (R, theta, L₀, attachment ratio). **Set the exoskeleton to those
+   values** — the table is pre-validated, so do not improvise between rows.
+2. In LabRecorder: Block/Task = `Default`, Run = the trial number shown, then
+   **Start**.
+3. Participant walks for the configured duration (90 s default).
+4. **Stop** in LabRecorder.
+5. Click **Analyze Trial** in the console.
+6. Review the QC output. Red banners mean investigate before accepting.
+7. The optimizer suggests the next `x`.
+
+The first `manual_ramp_trials` (default 5) come from `ramp_sequence` rather
+than the optimizer, so the GP starts with coverage of both the dorsiflexor and
+plantarflexor arms instead of clustering in one.
+
+---
 
 ## End of session
 
-1. Stop both sensor terminals (Ctrl+C).
-2. The UI auto-saves a checkpoint — you can close Streamlit.
-3. Raw XDFs are in `data/sub-<ID>/ses-<SESSION>/eeg/`.
-4. BO state + results summary in `data/sub-<ID>/ses-<SESSION>/derivatives/hil_optimization/`.
+1. Stop any sensor processes (Polar backend only).
+2. The console auto-saves a checkpoint; closing Streamlit is safe.
+3. Raw XDFs: `<base_dir>/sub-<ID>/ses-<SESSION>/{motion,eeg}/`
+4. BO state and results: `<base_dir>/sub-<ID>/ses-<SESSION>/derivatives/hil_optimization/`
+
+---
 
 ## If something goes wrong mid-session
 
-- **Sensor disconnects:** UI shows a red "SENSOR DISCONNECTED" banner.
-  Stop the affected `collect_sensors.py` process, restart it, click the
-  Reconnect button in the UI.
-- **Bad trial** (QC warnings, subject stumbled, etc.): delete the XDF,
-  decrement the UI trial counter via the sidebar, redo the trial.
-- **Streamlit crash:** reopen with the same command; the UI auto-resumes
-  from checkpoint.
+- **Sensor disconnects.** The console shows a red banner. On Trigno, both sides
+  share one inlet, so a drop takes out both — restart the bridge, then
+  re-attach from the console. On Polar, restart the affected sensor process.
+- **Bad trial** (QC warnings, a stumble, a pause): delete the XDF, decrement
+  the trial counter in the sidebar, redo it.
+- **Streamlit crash.** Reopen with the same command; it resumes from checkpoint.
+
+---
 
 ## Post-session analysis
 
-Run the full-trial diagnostic on each recording:
+Per-trial detection quality:
 
 ```bash
-python apps/diagnose_trial.py data/sub-P048/ses-S001/eeg/sub-P048_ses-S001_task-Default_run-001_eeg.xdf
+./apps/diagnose_trial.py <path-to-trial>.xdf
 ```
 
-This produces the 4-panel diagnostic figure showing detection quality, with
-sanity-check warnings printed to the terminal.
-
-For a batch summary across all trials:
+Compare the two detectors on the same recording — useful whenever a trial's
+numbers look surprising, since the methods fail on different strides:
 
 ```bash
-python scripts/batch_analyze.py data/sub-P048/ses-S001/eeg/
+./apps/compare_detectors.py <path-to-trial>.xdf
 ```
+
+Full session summary:
+
+```bash
+python scripts/analyze_experiment.py --base-dir ~/HITLO_Data
+```
+
+See [detection_pipeline.md](detection_pipeline.md) and
+[gyro_detection.md](gyro_detection.md) for what the detectors actually do, and
+the Validation status section of the [README](../README.md) for what has and
+has not been verified.

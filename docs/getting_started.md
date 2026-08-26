@@ -8,16 +8,25 @@ If something doesn't work, see the [Troubleshooting](#troubleshooting) section a
 
 ## What this code does (in one paragraph)
 
-HITLO_Symmetry runs a Bayesian-optimization-driven experiment to tune a passive ankle exoskeleton. Per trial: the code suggests spring parameters (anchor position **R**, rest length **L₀**), the experimenter physically sets the exo to those values, the participant walks for 60 seconds while two shank-mounted Polar H10 IMUs stream acceleration over Bluetooth, the code computes a step-time symmetry index from the recording, and feeds that back to the BO. After 5 exploration trials and 10 BO trials, you get the optimized spring parameters for that participant.
+HITLO_Symmetry runs a Bayesian-optimization-driven experiment to tune a passive
+ankle exoskeleton. Per trial: the code suggests one **stiffness index** value
+`x ∈ [−1, +1]`, which resolves through a pre-validated table into the four
+settings the experimenter dials in (R, theta, L₀, attachment ratio). The
+participant walks while two shank-mounted IMUs stream over LSL, the code
+computes a step-time symmetry index from the recording, and feeds that back to
+the optimizer. The first 5 trials follow a fixed ramp covering both the
+dorsiflexor and plantarflexor arms; the optimizer runs after.
 
 ---
 
 ## What you need
 
-**Hardware:**
+**Hardware** — one of two sensor setups:
 - LegExoNET passive ankle exoskeleton (or compatible spring-pulley device)
-- 2× Polar H10 chest straps — one mounted on each shank
-- Coban wrap (ACE bandage) for sensor mounting
+- **Trigno**: 2× Delsys Trigno Avanti on the shanks (accel + gyro, ~148 Hz),
+  plus a machine running the Trigno Control Utility and an LSL bridge
+- **Polar**: 2× Polar H10 chest straps worn on the shanks (accel only,
+  ~200 Hz), with Coban wrap for skin contact
 - Mac laptop with Python 3.9+
 
 **Software:**
@@ -57,10 +66,17 @@ Now edit `config/exo_symmetry_config.yml` in any text editor:
 
 - `Subject.id`: change to your participant ID (e.g. `P049`)
 - `Subject.session`: usually `S001` for first session
-- `Subject.base_dir`: change to where you want data saved (e.g. `/Users/yourname/HITLO`)
-- `sensors.left_id` and `sensors.right_id`: the MAC suffixes of your Polar H10s
+- `Subject.base_dir`: where data is saved (default `~/HITLO_Data`)
+- `Sensing.backend`: `trigno` or `polar` — this decides everything downstream,
+  including which detector runs and whether trials land in `motion/` or `eeg/`
+- `Sensing.detector`: `gyro` or `accel`. Leave it out and each backend uses its
+  default (gyro for Trigno, accel for Polar — Polar has no gyroscope).
+- `Sensing.stream`: Trigno only, the LSL stream name your bridge publishes
 
-If you don't know your sensor IDs, run `python apps/collect_sensors.py left` once — it'll scan and print all discoverable Polars in the area.
+**Polar only**: copy `config/sensors.example.json` to `config/sensors.json` and
+fill in your two BLE device IDs. If you do not know them, run
+`python apps/collect_sensors.py left` once — it scans and prints every
+discoverable Polar in range.
 
 ### 4. Install LabRecorder
 
@@ -82,44 +98,47 @@ Strongly recommended: **do this once before running on a real participant**, wit
 
 ### Step 1: Wear the sensors
 
-- Mount left Polar H10 on the left shank (medial side, just above the ankle)
-- Mount right Polar H10 on the right shank, with Coban wrap for skin contact
-- Make sure both are turned on (snap a button battery in if needed)
+Mount one sensor on each shank, medial side, just above the ankle at the bottom
+of the muscle belly. Polar straps need Coban wrap for skin contact; Trigno
+sensors clip on.
 
-### Step 2: Start sensor streaming (3 terminals)
+### Step 2: Bring up the streams
 
-**Terminal 1:**
 ```bash
-cd HITLO_Symmetry
-python apps/collect_sensors.py right
+streamlit run apps/hitlo_console.py
 ```
-Wait for `connected` message.
 
-**Terminal 2:**
-```bash
-python apps/collect_sensors.py left
-```
-Wait for `connected`.
+Open the **Sensors** page. It adapts to your backend:
 
-If a sensor fails to connect, see [Troubleshooting](#sensor-wont-connect).
+- **Trigno** — pairing and slot assignment happen in the Trigno Control Utility
+  on the base-station machine, so there is nothing here to scan or start. The
+  page *verifies*: stream present, channel count, rate, host, and which body
+  segments arrived. You want `left_shank` and `right_shank` both listed.
+- **Polar** — scan, assign sides, and start one process per sensor.
+
+Either way, **run the shake test before trusting the sides.** Sensors get
+swapped between sessions, and a swap inverts the sign of the symmetry index
+while producing perfectly plausible numbers. `./apps/verify_sides.py` does the
+same check from the terminal.
+
+If a Polar sensor fails to connect, see [Troubleshooting](#sensor-wont-connect).
 
 ### Step 3: Configure LabRecorder
 
 1. Open LabRecorder
-2. Click **Update** → both `polar accel left` and `polar accel right` should appear in the stream list
-3. Check both boxes
-4. **Save directory:** `~/HITLO/sub-P000/ses-S001/eeg/` (or whatever matches your config)
-5. **Filename template:** `sub-P000_ses-S001_task-Default_run-%n_eeg.xdf` (the `%n` auto-increments)
+2. Click **Update** → your streams appear (`TrignoIMU`, or `polar accel left`
+   and `polar accel right`)
+3. Check the boxes
+4. **Save directory** — must match your config:
+   `~/HITLO_Data/sub-P000/ses-S001/motion/` for Trigno,
+   `.../eeg/` for Polar
+5. **Filename template:** `sub-P000_ses-S001_task-Default_run-%n_motion.xdf`
+   (`_eeg.xdf` for Polar; `%n` auto-increments)
 
 ### Step 4: Start the experiment UI
 
-**Terminal 3:**
-```bash
-cd HITLO_Symmetry
-streamlit run apps/run_experiment.py
-```
-
-A browser tab will open at `http://localhost:8501`. In the sidebar, click **🔄 Initialize/Reset System**.
+The console is already running from Step 2. In the sidebar, click
+**🔄 Initialize/Reset System**.
 
 You should see in Terminal 3:
 ```
@@ -130,7 +149,8 @@ You should see in Terminal 3:
    ✅ LHS  R=0.XXXX  L0=0.XXXX | PF=0.00 Nm  DF=X.XX Nm  ...
 ```
 
-The browser shows "Trial 1/15" with R and L₀ values.
+The browser shows "Trial 1/15" with the index value and the device settings it
+resolves to.
 
 ### Step 5: Run a trial
 
@@ -157,13 +177,14 @@ python scripts/analyze_experiment.py --subject P000 --session S001
 ```
 
 This generates timeline plots, BO iteration visualizations, and the all-trials torque curve grid in:
-- `~/HITLO/sub-P000/ses-S001/eeg/gait_asymmetry_timeline.png`
-- `~/HITLO/sub-P000/ses-S001/derivatives/hil_optimization/visualizations/`
+- `~/HITLO_Data/sub-P000/ses-S001/{motion,eeg}/gait_asymmetry_timeline.png`
+- `~/HITLO_Data/sub-P000/ses-S001/derivatives/hil_optimization/visualizations/`
 
-You can also browse the GP iterations interactively:
+The console's **Results** page shows the GP posterior and the configuration to
+carry forward. For a full post-hoc pass over a session:
 
 ```bash
-streamlit run apps/gp_viewer.py -- --subject P000 --session S001
+python scripts/analyze_experiment.py --base-dir ~/HITLO_Data
 ```
 
 ---
@@ -196,7 +217,7 @@ This is normal and expected. The safety system caught a parameter combination th
 | `scripts/` | Batch utilities (e.g. `analyze_experiment.py`) |
 | `config/` | YAML config files |
 | `docs/` | Detailed documentation (workflow, detection algorithm) |
-| `tests/` | Unit tests |
+| `tests/` | Regression suite — `./tests/test_regression.py` |
 
 If you want to **change algorithm behavior**, edit something in `hitlo/`. If you want to **change experiment parameters**, edit `config/exo_symmetry_config.yml` (no code changes needed).
 
@@ -223,7 +244,11 @@ pip install -e .
 
 ### Sensor won't connect
 
-- Make sure the Polar H10 is on (button battery installed, snapped to chest strap)
+- **Trigno**: the bridge runs on the base-station machine, not this one. Check
+  it is publishing, and that this machine can see it on the network — the
+  console does not filter by host.
+- **Polar**: make sure the H10 is on (button battery installed, snapped to the
+  strap)
 - Move the laptop closer (BLE has limited range)
 - Restart Bluetooth: turn it off and back on in macOS settings
 - Try the other sensor first to confirm one works before debugging both
@@ -250,7 +275,7 @@ Just redo the trial. Delete the bad XDF, click **Check File** again, re-record.
 
 Just restart it:
 ```bash
-streamlit run apps/run_experiment.py
+streamlit run apps/hitlo_console.py
 ```
 
 It auto-resumes from the saved checkpoint. The trials you've already run are preserved.

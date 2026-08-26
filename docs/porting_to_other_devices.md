@@ -222,7 +222,7 @@ cd HITLO_Symmetry
 grep -rn "R, L0\|self._R\|self._L0" hitlo/ apps/ scripts/
 ```
 
-You'll see ~20 hits across `cost.py`, `hil_exo.py`, `apps/run_experiment.py`, and `apps/diagnose_trial.py`. Walk through each one and update.
+You'll see hits across `cost.py`, `hil_exo.py`, `apps/hitlo_console.py`, and `apps/diagnose_trial.py`. Walk through each one and update.
 
 Key locations:
 
@@ -236,8 +236,9 @@ Key locations:
 - All `R, L0 = candidate[0], candidate[1]` → `params = candidate`
 - `_top_k_safe_fallback()` builds a 2D grid (`R_vals`, `L0_vals`); for higher dimensions, you'll need a sparser grid or a different sampling strategy. **Important**: a 50×50 grid is 2500 points and works in 2D. For 3D it'd be 125,000 (50³) — too many. For 3+D, replace the grid with random sampling weighted by EI, or use BoTorch's `optimize_acqf` with multiple restarts. See "Higher dimensions" below.
 
-**`apps/run_experiment.py`**:
-- Display logic — currently shows "R = 0.27, L₀ = 0.32". Update to show whatever your params are.
+**`apps/hitlo_console.py`**:
+- Display logic — shows the index value and the device settings it resolves to.
+  Update to show whatever your parameters are.
 
 **`apps/diagnose_trial.py`**:
 - The CLI prints "R, L0" in headers. Update for your params.
@@ -282,10 +283,9 @@ These are device-agnostic and require **no changes**:
 | `hitlo/symmetry.py` | Step-time interleaving and SI computation — pure gait analysis |
 | `hitlo/io.py` | XDF loading and BIDS filename helpers |
 | Most of `hitlo/hil_exo.py` | The BO wrapper, LHS exploration, top-K fallback logic — all parameter-count-aware |
-| `apps/run_experiment.py` UI structure | Streamlit layout, plot helpers, fragment patterns |
+| `apps/hitlo_console.py` UI structure | Streamlit layout, plot helpers, fragment patterns |
 | `apps/diagnose_trial.py` | CLI flow |
 | `scripts/analyze_experiment.py` | Post-hoc batch analysis |
-| `apps/gp_viewer.py` | Interactive GP iteration browser |
 | Detection thresholds in `hitlo/detection.py:DetectionConfig` | These tune to gait, not to the device — adjust per population (stroke vs. healthy vs. amputee) but not per exo |
 
 If you find yourself editing any of these for a port, stop and reconsider — you're probably going about it the hard way.
