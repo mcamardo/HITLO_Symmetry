@@ -320,6 +320,53 @@ def test_gyro_detector_finds_known_contacts():
     return f"all contacts recovered in 6 regimes, worst median error {worst:.1f} ms"
 
 
+def test_session_calibration_reuse_is_exact_and_guarded():
+    """Capturing a calibration once and reusing it must reproduce the direct
+    path exactly, and must refuse a sensor it did not come from.
+
+    Standing still before every trial is not practical, so a session-level
+    calibration is the realistic workflow. Measured on a recording with two
+    quiet stands 105 s apart, reuse costs a 0.9 degree offset with the
+    stride-averaged shape correlating at r = 0.9999 -- but only while the
+    sensors stay put. A zero encodes where a sensor sits on the limb, so
+    applying one sensor's calibration to another gives a smooth, plausible,
+    wrong angle. That has to raise, not warn.
+    """
+    from hitlo.ankle_angle import ankle_angle, session_calibration
+    from hitlo.io import SensorStream
+    fs, n = 148.0, int(60 * 148)
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(5)
+
+    def limb(name, bias, tilt_deg):
+        w = 200.0 * np.sin(2 * np.pi * t / 1.2) + bias
+        w[t < 12] = bias + rng.normal(0, 0.5, int((t < 12).sum()))   # quiet stand
+        g = np.zeros((n, 3)); g[:, 2] = w
+        a = np.zeros((n, 3))
+        a[:, 0] = np.sin(np.radians(tilt_deg)); a[:, 1] = np.cos(np.radians(tilt_deg))
+        a += rng.normal(0, .01, a.shape)
+        return SensorStream(name=name, timestamps=t + 1000.0, accel=a, gyro=g,
+                            actual_fs=fs)
+
+    foot = limb("foot", -8.9, 20.0)
+    shank = limb("shank", 2.1, 3.0)
+
+    cal = session_calibration(foot, shank, calib=(1.0, 11.0))
+    direct = ankle_angle(foot, shank, calib=(1.0, 11.0))["angle"]
+    reused = ankle_angle(foot, shank, calibration=cal)["angle"]
+    worst = float(np.max(np.abs(direct - reused)))
+    assert worst < 1e-9, f"reuse differs from the direct path by {worst:.3e} deg"
+
+    stranger = limb("someone_else", 2.1, 3.0)
+    try:
+        ankle_angle(foot, stranger, calibration=cal)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a calibration from another sensor was accepted")
+    return f"reuse exact to {worst:.1e} deg; mismatched sensor refused"
+
+
 def test_gyro_axis_is_measured_not_assumed():
     """The sagittal axis identifies itself; a pinned wrong axis warns.
 

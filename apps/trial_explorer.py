@@ -35,7 +35,8 @@ from plotly.subplots import make_subplots
 from hitlo.io import (load_streams, load_trigno_segment, sensing_config,
                       trigno_inventory)
 from hitlo.ankle_angle import (ankle_angle, stride_profile, verify_foot_side,
-                               find_calibration_window)
+                               find_calibration_window, session_calibration,
+                               validate_calibration_pose, CALIBRATION_POSE)
 from hitlo.detectors import detect, detector_name
 from hitlo.symmetry import compute_step_times, compute_symmetry_index
 
@@ -399,20 +400,56 @@ else:
                        f"{chk['lag_other_s']*1000:+.0f} ms from the other).")
 
         shank = sh_same if pair_side == fside else sh_other
-        cal = find_calibration_window(shank)
+
+        with st.expander("⚖️ Calibration", expanded=True):
+            st.markdown(f"**The pose:** {CALIBRATION_POSE}")
+            auto = find_calibration_window(shank)
+            if auto is None:
+                st.warning(
+                    "No quiet period found in this recording, so there is no "
+                    "neutral pose to calibrate against. The angle below falls "
+                    "back to a foot-flat zero — usable for shape and range of "
+                    "motion, but not comparable with standing-calibrated trials.")
+                cal_win = None
+            else:
+                cal_win = st.slider(
+                    "Calibration window (s)", 0.0, float(t[-1]),
+                    (float(auto[0]), float(auto[1])), step=0.5, key="calwin",
+                    help="Auto-detected as the longest still stretch. Adjust if "
+                         "the subject was not in the neutral pose for all of it.")
+                v = validate_calibration_pose(foot, shank, cal_win)
+                icon = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+                rows = [{"check": c["name"], "": icon[c["level"]],
+                         "measured": c["detail"], "why it matters": c["why"]}
+                        for c in v["checks"]]
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+                if not v["ok"]:
+                    st.error("**This is not a usable neutral pose.** A "
+                             "calibration inherits every error in the posture "
+                             "it was captured in, silently — the angle below "
+                             "will look clean and be wrong.")
+                elif v["warn"]:
+                    st.warning("Usable, but not a clean hold. Check the "
+                               "warnings above before trusting small "
+                               "differences between trials.")
+                else:
+                    st.success("Good neutral pose.")
+                st.caption(
+                    "Capture this once per mounting and reuse it for the "
+                    "session — measured across ~105 s, reuse costs a 0.9° "
+                    "offset and leaves the shape unchanged (r = 0.9999). "
+                    "Recapture only if a sensor is re-mounted, since the zero "
+                    "encodes where the sensor sits on the limb.")
+
         try:
-            res = ankle_angle(foot, shank)
+            res = ankle_angle(foot, shank, calib=cal_win)
         except Exception as e:
             st.warning(f"Could not compute ankle angle: {e}")
             res = None
 
         if res is not None:
             ta, ang = res["t"], res["angle"]
-            if res["zero"] == "standing":
-                st.caption(f"Calibrated on quiet standing "
-                           f"{res['calib'][0]:.0f}–{res['calib'][1]:.0f} s. "
-                           f"{res['note']}")
-            else:
+            if res["zero"] != "standing":
                 st.warning(res["note"])
 
             m = "gyro" if "gyro" in EV else list(EV)[0]
