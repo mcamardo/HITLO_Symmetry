@@ -120,6 +120,7 @@ HITLO_Symmetry/
 │   ├── workflow.md                # experiment-day procedure
 │   ├── detection_pipeline.md      # accelerometer algorithm + references
 │   ├── gyro_detection.md          # gyroscope algorithm + what a bridge must provide
+│   ├── trigno_setup.md            # Delsys hardware setup, end to end
 │   └── porting_to_other_devices.md  # adapting to non-LegExoNET devices
 │
 └── tests/                         # regression suite (./tests/test_regression.py)
