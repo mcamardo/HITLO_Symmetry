@@ -61,6 +61,33 @@ existing recordings still load).
    ```
 4. Watch the live plots for a few strides before starting.
 
+### Calibration pose (only if you are recording ankle angle)
+
+Ankle angle needs a neutral reference. Step time and the symmetry index do
+not — skip this if you are not using a foot sensor.
+
+At the start of the **first** trial after mounting, have the participant hold:
+
+> **Stand tall and still, weight even on both feet, feet flat and pointing
+> forward, knees straight but not locked, arms at your sides. Look ahead, not
+> down. Hold for 10 seconds.**
+
+Being specific matters. "Stand still" is not enough: a subject resting weight
+on one leg, or with a knee soft, still produces a clean-looking zero that does
+not correspond to the neutral their gait is measured against.
+
+**Capture it once per mounting, not once per trial.** Measured on a recording
+with two quiet stands 105 s apart, reusing the earlier one costs a 0.9 degree
+offset and leaves the stride-averaged shape unchanged (r = 0.9999); gyro bias
+moved 0.09 deg/s on the foot and 0.01 on the shank over that interval. What it
+does *not* survive is a sensor being re-strapped — the zero encodes where the
+sensor sits on the limb, so re-mount means re-capture.
+
+`apps/trial_explorer.py` shows the captured window and checks it: duration,
+stillness, that each sensor reads ~1 g, and that the shank is near vertical.
+It rejects a window that is not a usable neutral rather than quietly producing
+a plausible wrong angle.
+
 ---
 
 ## Running trials

@@ -95,6 +95,7 @@ HITLO_Symmetry/
 │   ├── cost.py                    # BO cost function (SymmetryCost class)
 │   ├── io.py                      # XDF/LSL loading for both backends, file naming
 │   ├── index_unified.py           # unified stiffness index (the BO's x axis)
+│   ├── ankle_angle.py             # ankle angle from foot + shank IMUs (offline)
 │   ├── plot_heelstrikes.py        # shared detection plotting
 │   └── hil_exo.py                 # HIL_Exo experiment driver (wraps HIL_toolkit's BO)
 │
