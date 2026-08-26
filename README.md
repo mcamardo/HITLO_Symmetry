@@ -216,6 +216,55 @@ walkthrough of what to change.
 
 ---
 
+## Validation status
+
+Stated plainly, because the distinction matters when reading any number this
+code produces.
+
+**There is no external reference in this dataset.** No force plate,
+instrumented treadmill, motion capture, or footswitches. Every check below
+compares one IMU-derived estimate against another. Agreement between them is
+*consistency*, not *accuracy* — a bias shared by both methods is invisible to
+all of it.
+
+**What has been checked** (sub-P012/ses-S001, 8 walking trials, Trigno):
+
+- The two detectors are independent in sensor, algorithm and body segment, and
+  agree on the symmetry index to a mean of 3.0 points across trials.
+- Gyro polarity is verified on 16/16 legs. An earlier heuristic picked the
+  wrong lobe on every one of them, placing contact ~480 ms early; see the
+  regression test `test_gyro_polarity_prefers_the_larger_lobe`.
+- Stride counts, stride-time regularity and physiological plausibility of step
+  times: the six normal-cadence trials produce zero implausible step times on
+  the gyro path.
+- 16 regression tests, including detection on synthetic signals with known
+  contact times, dtype invariance, and a cross-backend end-to-end run.
+
+**What has NOT been established:**
+
+- **Absolute timing accuracy.** The gyro marks contact 40–110 ms before the
+  accelerometer's impact peak; which is closer to true initial contact is
+  unknown without an external reference.
+- **The left leg.** The optional foot sensor has only ever been mounted on the
+  right, so the left — the exo side, where a damped limb may behave
+  differently — has no independent cross-check at all.
+- **Per-leg bias.** The gyro-minus-accelerometer offset differs by ~10 ms
+  between legs, worth roughly 2.7 SI points. Small, but not zero, against a
+  target of SI = 0.
+- **Ankle angle** (foot + shank IMU, offline only). Waveform shape and landmark
+  timing match published gait kinematics, but range of motion comes out
+  ~17–20° against a literature 25–30°, most likely mounting compliance. Do not
+  quote the magnitudes.
+- **Toe-off** (`detect_toe_off_gyro`) is implemented, known to be wrong, and
+  deliberately guarded. It reports ~35% stance per stride, which is not
+  physiological. Nothing in the cost function uses it.
+
+**If you are extending this**, the cheapest thing that would resolve most of
+the above is a pair of FSR footswitches under the heels for one trial: a true
+external reference on both legs simultaneously.
+
+---
+
 ## Configuration
 
 Copy `config/exo_symmetry_config.example.yml` to `exo_symmetry_config.yml` and edit:
