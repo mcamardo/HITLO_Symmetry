@@ -159,6 +159,9 @@ if 'initialized' not in st.session_state:
     st.session_state.cost_extractor = None
     st.session_state.results = []
     st.session_state.config = None
+    st.session_state.session_started_at = time.time()
+    st.session_state.checkpoint_error = None
+    st.session_state.checkpoint_at = None
     st.session_state.lsl_inlet_left = None
     st.session_state.lsl_inlet_right = None
     st.session_state.live_data_left = {'time': [], 'x': [], 'y': [], 'z': []}
@@ -221,11 +224,25 @@ def save_checkpoint() -> None:
         }
         path = _checkpoint_path(config)
         tmp = path + '.tmp'
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(tmp, 'w') as f:
             json.dump(ckpt, f, indent=2)
         os.replace(tmp, path)
-    except Exception:
-        pass
+        st.session_state.checkpoint_error = None
+        st.session_state.checkpoint_at = time.time()
+    except Exception as e:
+        # This used to be `except Exception: pass`. A checkpoint that cannot be
+        # written -- bad path, full disk, permissions -- is exactly the failure
+        # you must not discover at the end of a session, so say so loudly and
+        # let the operator copy the numbers off the screen before continuing.
+        st.session_state.checkpoint_error = f"{type(e).__name__}: {e}"
+        try:
+            st.error(f"**Checkpoint NOT saved** ({type(e).__name__}: {e}). "
+                     f"Progress is only in this browser session — if it closes "
+                     f"you lose it. Record the trial results shown below before "
+                     f"continuing.")
+        except Exception:
+            pass
 
 
 def load_checkpoint(config) -> dict:
@@ -666,6 +683,17 @@ def save_config_to_disk(cfg: dict) -> bool:
 # ===========================================================================
 
 def check_file_exists(trial_num: int) -> bool:
+    return trial_file_state(trial_num)['exists']
+
+
+def trial_file_state(trial_num: int) -> dict:
+    """Does the recording exist, and has LabRecorder finished writing it?
+
+    A file appears the moment recording STARTS, so existence alone is not
+    enough -- analyzing mid-write reads a truncated XDF and reports a short
+    trial or no heel strikes at all. Treat it as settled only once its size
+    has stopped changing between polls.
+    """
     trial_dir = st.session_state.cost_extractor.trial_data_dir
     fname = trial_filename(
         st.session_state.config['Subject']['id'],
@@ -673,7 +701,54 @@ def check_file_exists(trial_num: int) -> bool:
         trial_num,
         modality=backend_modality(st.session_state.config),
     )
-    return os.path.exists(os.path.join(trial_dir, fname))
+    path = os.path.join(trial_dir, fname)
+    if not os.path.exists(path):
+        st.session_state.pop(f'_fsize_{trial_num}', None)
+        return dict(exists=False, settled=False, stale=False,
+                    path=path, name=fname, size=0, mtime=None)
+    size = os.path.getsize(path)
+    mtime = os.path.getmtime(path)
+    # A file matching this trial's name may be left over from an earlier
+    # session on the same subject and run number. Analyzing it silently would
+    # feed the optimizer someone else's walk, or this participant's walk at a
+    # different device setting, with nothing to distinguish it.
+    stale = mtime < st.session_state.get('session_started_at', 0)
+    key = f'_fsize_{trial_num}'
+    prev = st.session_state.get(key)
+    st.session_state[key] = size
+    settled = prev is not None and prev == size and size > 0
+    return dict(exists=True, settled=settled, stale=stale, path=path,
+                name=fname, size=size, mtime=mtime)
+
+
+def preview_trial(trial_num: int) -> dict:
+    """Extract the trial's cost WITHOUT committing it to the optimizer.
+
+    Analysis and acceptance are deliberately separate. analyze_current_trial()
+    does both -- it appends to hil.x_opt/y_opt -- so running it automatically
+    would silently commit a stumble, a mis-set device, or a trial the
+    participant cut short. Once a bad point is in the GP the only way out is
+    editing the checkpoint.
+
+    So the console runs THIS as soon as the recording finishes, shows what it
+    got, and waits for a human to accept. The cost is one extra extraction per
+    trial (a second or two); detection is deterministic, so the number shown is
+    the number committed.
+    """
+    config = st.session_state.config
+    fname = trial_filename(config['Subject']['id'], config['Subject']['session'],
+                           trial_num, modality=backend_modality(config))
+    ex = st.session_state.cost_extractor
+    try:
+        cost = ex.extract_cost_from_file(trial_num=trial_num, filename=fname)
+    except Exception as e:
+        return dict(ok=False, reason=f"{type(e).__name__}: {e}", fname=fname)
+    if cost is None or np.isnan(cost):
+        return dict(ok=False, fname=fname,
+                    reason=getattr(ex, 'last_failure', None)
+                    or "cost extraction failed (no reason recorded)")
+    return dict(ok=True, cost=float(cost), fname=fname,
+                warnings=list(getattr(ex, 'last_warnings', []) or []))
 
 
 def analyze_current_trial() -> bool:
@@ -1845,19 +1920,22 @@ def _baseline_phase(config):
         disp = st.number_input("Displacement (%)", value=10.0, min_value=1.0,
                                max_value=30.0, step=1.0, key="bl_disp")
     with cb2:
-        ready = baseline_file_exists(BASELINE_TRIAL_RUN)
-        if ready:
-            st.success(f"Found {base_fn}")
-        else:
-            st.warning(f"Waiting for {base_fn}")
-        if st.button("📊 Analyze baseline (run-002)", type="primary",
-                     width="stretch", disabled=not ready):
-            si = analyze_baseline(BASELINE_TRIAL_RUN)
-            if si is None:
-                st.error("Analysis failed.")
+        @st.fragment(run_every=2.0)
+        def _await_baseline():
+            ready = baseline_file_exists(BASELINE_TRIAL_RUN)
+            if ready:
+                st.success(f"Found {base_fn}")
             else:
-                st.session_state.baseline_si = si
-                st.rerun()
+                st.warning(f"Waiting for {base_fn}")
+            if st.button("📊 Analyze baseline (run-002)", type="primary",
+                         width="stretch", disabled=not ready):
+                si = analyze_baseline(BASELINE_TRIAL_RUN)
+                if si is None:
+                    st.error("Analysis failed.")
+                else:
+                    st.session_state.baseline_si = si
+                    st.rerun(scope="app")
+        _await_baseline()
     with cb3:
         locked = (st.session_state.baseline_si is None)
         if st.button("✅ Lock target & start", width="stretch",
@@ -1977,24 +2055,73 @@ def _optimization_phase(config, signed):
         3. Walk {config['Cost']['time']} s · Stop · Analyze below.
         """)
 
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        ok = check_file_exists(trial_num)
-        if ok:
-            st.success(f"run-{trial_num:03d}.xdf")
-        else:
-            st.warning(f"Waiting for run-{trial_num:03d}.xdf")
-    with a2:
-        if st.button("🔍 Check file", width="stretch"):
-            st.rerun()
-    with a3:
-        if st.button("▶️ Analyze Trial", type="primary", width="stretch",
-                     disabled=not ok):
+    # Watch for the recording instead of making the operator poll for it.
+    # This used to be a "Check file" button whose only job was to force a
+    # rerun so the existence check ran again -- a manual poll, clicked once
+    # per trial for no reason. A fragment does it automatically.
+    @st.fragment(run_every=2.0)
+    def _await_trial():
+        st_ = trial_file_state(trial_num)
+        pkey = f'_preview_{trial_num}'
+
+        if not st_['exists']:
+            st.session_state.pop(pkey, None)
+            st.warning(f"Waiting for `{st_['name']}` — start LabRecorder when "
+                       f"the participant is walking.")
+            return
+        if not st_['settled']:
+            st.info(f"Recording… `{st_['name']}` is {st_['size']/1e6:.1f} MB and "
+                    f"still growing. Stop LabRecorder when the trial ends.")
+            return
+
+        if st_.get('stale'):
+            import datetime as _dt
+            when = _dt.datetime.fromtimestamp(st_['mtime'])
+            st.error(
+                f"**`{st_['name']}` predates this session** — it was written "
+                f"{when:%b %d %H:%M}, before the console started. This is "
+                f"almost certainly a leftover from an earlier run on the same "
+                f"subject and run number, not the trial you just recorded.\n\n"
+                f"Delete or rename it and re-record, or change the subject/"
+                f"session id. Nothing will be analyzed until it is gone.")
+            return
+
+        # Recording finished: analyze it straight away, no click needed.
+        if pkey not in st.session_state:
             with st.spinner("Analyzing…"):
+                st.session_state[pkey] = preview_trial(trial_num)
+
+        pv = st.session_state[pkey]
+        if not pv['ok']:
+            st.error(f"Could not analyze `{pv['fname']}`: {pv['reason']}")
+            if st.button("🔄 Try again", key=f"retry_{trial_num}"):
+                st.session_state.pop(pkey, None)
+            return
+
+        for w in pv.get('warnings', []):
+            st.warning(w)
+        tgt = _si_target(st.session_state.config)
+        b1, b2, b3 = st.columns([1.2, 1, 1])
+        b1.metric("Symmetry index", f"{pv['cost']:+.2f}%",
+                  f"{pv['cost'] - tgt:+.2f} from target")
+        with b2:
+            if st.button("✅ Accept", type="primary", width="stretch",
+                         key=f"acc_{trial_num}"):
                 if analyze_current_trial():
-                    st.rerun()
+                    st.session_state.pop(pkey, None)
+                    st.rerun(scope="app")
                 else:
-                    st.error("Analysis failed.")
+                    st.error("Accepting failed — nothing was committed.")
+        with b3:
+            if st.button("🗑️ Discard", width="stretch", key=f"rej_{trial_num}",
+                         help="Nothing enters the optimizer. Delete or rename "
+                              "the XDF, then re-record this trial."):
+                st.session_state.pop(pkey, None)
+                st.info("Discarded. Delete or rename the file, then re-record.")
+        st.caption("Analysis runs automatically when the recording finishes. "
+                   "Nothing reaches the optimizer until you accept, so a "
+                   "stumble or a mis-set device can still be thrown away.")
+    _await_trial()
 
     # Latest QC inline
     if st.session_state.results:
