@@ -227,7 +227,28 @@ compares one IMU-derived estimate against another. Agreement between them is
 *consistency*, not *accuracy* — a bias shared by both methods is invisible to
 all of it.
 
-**What has been checked** (sub-P012/ses-S001, 8 walking trials, Trigno):
+**Tested against a known manipulation.** The one piece of evidence here that
+does not reduce to IMUs agreeing with each other: three trials where the
+subject walked normally, then with a deliberate limp on the right, then on the
+left. Which leg was impaired is not in doubt.
+
+| detector | normal | limp RIGHT | limp LEFT | verdict |
+|---|---|---|---|---|
+| gyro (shipping) | −4.93% | −2.42% | −15.00% | both directions correct, 12.6 pt separation |
+| accelerometer | −4.39% | −0.07% | −3.65% | **limp LEFT comes out the wrong sign** |
+
+The limps were not equally hard — measured at the step-time level, the left
+limp shifted gait 67 ms against the right limp's 19 ms. Normalising for that,
+the gyro reports 0.13 SI points per ms for one and 0.15 for the other, so its
+response is proportional and even-handed; the raw asymmetry in the table is the
+manipulation, not the detector. The accelerometer reports a shift toward the
+right leg when the left was the impaired one, which is consistent with it
+dropping nine strides in that trial.
+
+This validates **direction and sensitivity**. It says nothing about absolute
+timing accuracy — for that you still need an external reference.
+
+**What else has been checked** (sub-P012/ses-S001, 8 walking trials, Trigno):
 
 - The two detectors are independent in sensor, algorithm and body segment, and
   agree on the symmetry index to a mean of 3.0 points across trials.
