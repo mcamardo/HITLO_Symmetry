@@ -163,17 +163,30 @@ class HIL_Exo:
 
         HIL_toolkit accepts a kernel_parms dict but does not use it (marked TODO
         in its constructor), so the constraint is applied to the built kernel.
+
+        SET THE CONSTRAINT ATTRIBUTES, NOT THE BUILT MODULE. An earlier version
+        assigned BO.kernel.covar_module directly, which did nothing: BO.run()
+        calls kernel.reset() before every fit, and reset() rebuilds
+        covar_module from kernel.length_scale_constraints -- the Interval(0, 10)
+        set in SE.__init__. The override was discarded on the first fit of
+        every session, so the constraint was never once active during BO.
+
+        What that looked like: the GP fitted lengthscale ~8.3 on a [0, 1] axis
+        and noise ~1.07 against standardized targets, i.e. it explained the
+        data as pure noise. The posterior mean came out flat to three decimal
+        places, the acquisition was near-uniform, and BO chose essentially at
+        random. In a simulated session with a known optimum at x = +0.067 it
+        settled on x = +1.000.
         """
         try:
             from gpytorch.kernels import ScaleKernel, RBFKernel
             from gpytorch.constraints import Interval, GreaterThan
-            covar = ScaleKernel(
-                RBFKernel(ard_num_dims=1,
-                          lengthscale_constraint=Interval(0.05, 1.0)),
-                outputscale_constraint=Interval(0.05, 10.0),
-            )
-            self.BO.kernel.covar_module = covar
-            self.BO.covar_module = covar
+            ls, out = Interval(0.05, 1.0), Interval(0.05, 10.0)
+            k = self.BO.kernel
+            k.length_scale_constraints = ls
+            k.output_constraints = out
+            k.reset()                      # rebuild under the new constraints
+            self.BO.covar_module = k.get_covr_module()
             self._noise_floor = 1e-2
             self.BO._noise_constraints = np.array([self._noise_floor, 10.0])
             print(f"   GP kernel: lengthscale constrained to [0.05, 1.0], "
