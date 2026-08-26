@@ -348,14 +348,34 @@ Optimization:
 For healthy subjects, the goal is to induce a fixed *displacement* from the
 subject's own baseline asymmetry, not a fixed absolute SI. The baseline phase:
 
-1. **Pre run-001** — no-device familiarization walk. **Not analyzed.**
-2. **Pre run-002** — THE baseline trial (band slack, no perturbation).
-   Its signed SI alone defines `baseline_si`.
+1. **Pre run-001** — familiarization walk. **Not analyzed.**
+2. **Pre run-002** — THE baseline trial: device worn, no motor and no bands,
+   so it captures the subject's own asymmetry with the device's weight but no
+   perturbation. Its signed SI alone defines `baseline_si` (no averaging).
 3. **Target is computed as:**
    ```
-   si_target = baseline_si - displacement
+   si_target = baseline_si + sign(baseline_si) × displacement
    ```
-   Always pushed more negative, matching the left-side device geometry.
+   The subject's existing asymmetry, amplified **in its own direction** —
+   error augmentation. Displacement defaults to 10 points and is set on the
+   baseline page, not in this config.
+
+   ```
+   baseline -6%  ->  target -16%     (left-dominant, pushed further left)
+   baseline +3%  ->  target +13%     (right-dominant, pushed further right)
+   ```
+
+   This replaced an earlier always-negative rule (`baseline - displacement`),
+   written when the device could only perturb one way. That rule amplified
+   negative-baseline subjects correctly but drove positive-baseline subjects
+   **through zero**: +3% became -7%, reversing their asymmetry rather than
+   augmenting it, and delivering a 10-point dose to one subject and 3 to
+   another.
+
+   Within a ±1.5% deadband the sign of the baseline is not resolvable — a
+   subject at +0.2% is not meaningfully right-dominant — so the device's
+   default direction (negative) is used instead of taking that sign at face
+   value.
 
 4. The BO then optimizes to minimize `|SI - si_target|`.
 

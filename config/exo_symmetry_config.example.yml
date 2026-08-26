@@ -63,7 +63,7 @@ Cost:
   signed: true
 
   # Target symmetry index in percent. For Aim 1 this is only a fallback: the
-  # baseline phase computes si_target = baseline_si - displacement and
+  # baseline phase computes si_target = baseline_si + sign(baseline_si)*displacement and
   # overwrites it. For Aim 2 it is forced to 0.
   si_target: -3.0
 
