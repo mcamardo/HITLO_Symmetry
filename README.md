@@ -71,6 +71,7 @@ The console's **Sensors** page adapts to the backend in your config:
 Standalone tools, if you prefer the terminal:
 
 ```bash
+streamlit run apps/trial_explorer.py   # browse recordings and detection
 ./apps/preflight.py             # pre-session readiness check
 ./apps/verify_sides.py          # confirm which stream is which leg
 ./apps/diagnose_trial.py FILE   # per-trial QC plots
@@ -101,6 +102,7 @@ HITLO_Symmetry/
 │   ├── hitlo_console.py           # Streamlit console — the main interface
 │   ├── preflight.py               # pre-session readiness check
 │   ├── verify_sides.py            # confirm stream-to-leg mapping
+│   ├── trial_explorer.py          # browse any recording, interactively
 │   ├── diagnose_trial.py          # standalone trial QC plotter
 │   ├── compare_detectors.py       # accel vs gyro on one recording
 │   ├── check_placement.py         # compare sensor mountings empirically

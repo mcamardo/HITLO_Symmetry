@@ -106,7 +106,15 @@ plantarflexor arms instead of clustering in one.
 
 ## Post-session analysis
 
-Per-trial detection quality:
+Browse any recording interactively — pick a file, see where the walking was,
+where every heel strike landed on the raw signal, and how the two detectors
+compare. Zoomable, and it switches backends and detectors from the sidebar:
+
+```bash
+streamlit run apps/trial_explorer.py
+```
+
+Per-trial detection quality, as a one-shot figure:
 
 ```bash
 ./apps/diagnose_trial.py <path-to-trial>.xdf
