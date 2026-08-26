@@ -45,8 +45,20 @@ Sensing:
   # initial contact, the jerk peak is the impact shock after it. A baseline
   # collected with one must not be carried into a session run with the other.
   # apps/compare_detectors.py measures the difference on your own recording.
-  backend: polar
-  detector: accel
+  #
+  # WHY trigno + gyro IS THE DEFAULT. At 148 Hz the accelerometer's
+  # heel-strike impact spans about 2 samples and its peak amplitude varies
+  # ~25% stride to stride, so a soft strike can drop below threshold and be
+  # missed -- measured on sub-P012, the accel path missed 9 strides in one
+  # trial that the gyro found. The gyro's mid-swing feature spans about 39
+  # samples with ~10% amplitude variation: roughly 20x better resolved by the
+  # same hardware. On a known manipulation (a deliberate limp) the gyro got
+  # both directions right while the accelerometer reported the wrong leg.
+  #
+  # Set backend: polar for the Polar H10 path, which has no gyroscope and so
+  # must use the accelerometer. It is kept working and tested.
+  backend: trigno
+  detector: gyro
   stream: TrignoIMU        # only used when backend is trigno
 
 Cost:
