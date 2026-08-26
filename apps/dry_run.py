@@ -28,7 +28,9 @@ not about the exoskeleton.
 """
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -88,6 +90,12 @@ def _replay_subject(subject_dir: Path, rng, noise):
 # ------------------------------------------------------------------ run ----
 
 def run_session(cfg, walk, truth, rng, verbose=True):
+    """One simulated session.
+
+    Runs with the working directory moved to a scratch dir: HIL_toolkit writes
+    an autoiter_<n>/ checkpoint folder per BO iteration into the cwd, and a dry
+    run would otherwise scatter dozens of them through the repo.
+    """
     from hitlo.hil_exo import HIL_Exo
 
     class _Stub:
@@ -97,6 +105,9 @@ def run_session(cfg, walk, truth, rng, verbose=True):
     hil = HIL_Exo(cfg, _Stub())
     hil.si_target = float(cfg["Cost"].get("si_target", 0.0))
     hil._generate_initial_parameters()
+    _prev_cwd = os.getcwd()
+    _scratch = tempfile.mkdtemp(prefix="hitlo_dryrun_")
+    os.chdir(_scratch)
 
     n_steps = int(cfg["Optimization"]["n_steps"])
     target = float(cfg["Cost"].get("si_target", 0.0))
@@ -144,6 +155,9 @@ def run_session(cfg, walk, truth, rng, verbose=True):
                     print(f"                 (BO fell back to the table edge: {e})")
                 nxt = float(hil.table.x_values[0])
             hil.x = np.concatenate((hil.x, [[nxt]]), axis=0)
+    os.chdir(_prev_cwd)
+    import shutil
+    shutil.rmtree(_scratch, ignore_errors=True)
     return hil, hist
 
 
