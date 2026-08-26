@@ -79,6 +79,7 @@ import streamlit as st
 import yaml
 
 # Make hitlo importable when running streamlit from the repo root
+DEFAULT_DATA_DIR = os.path.expanduser('~/HITLO_Data')
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -1506,7 +1507,7 @@ def page_setup():
         st.error("No config found. Defaults loaded — edit and save.")
         _cfg = {
             'Subject': {'id': 'P001', 'session': 'S001',
-                        'base_dir': '/Users/maccamardo/HITLO_Data'},
+                        'base_dir': DEFAULT_DATA_DIR},
             'Cost': {'aim': 'Aim 1', 'sample_rate': 200, 'time': 90,
                      'signed': True, 'si_target': -10.0, 'trim_seconds': 3.0},
             'Optimization': {
@@ -1534,7 +1535,7 @@ def page_setup():
         with cc3:
             subj['base_dir'] = st.text_input(
                 "Base data dir",
-                value=str(subj.get('base_dir', '/Users/maccamardo/HITLO_Data')))
+                value=str(subj.get('base_dir', DEFAULT_DATA_DIR)))
 
     with st.container(border=True):
         st.subheader("🎯 Paradigm")
@@ -2055,7 +2056,7 @@ def page_gp_viewer():
     # ---- Load past session ----
     base_default = (st.session_state.config['Subject']['base_dir']
                     if st.session_state.get('config')
-                    else '/Users/maccamardo/HITLO_Data')
+                    else DEFAULT_DATA_DIR)
     c1, c2, c3 = st.columns(3)
     with c1:
         base_dir = st.text_input("Base dir", value=base_default)

@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument('--subject', required=True, help='Subject ID (e.g. P049)')
     p.add_argument('--session', default='S001', help='Session ID')
-    p.add_argument('--base-dir', default='/Users/maccamardo/HITLO',
+    p.add_argument('--base-dir', default=os.path.expanduser('~/HITLO_Data'),
                    help='Base directory containing sub-*/ses-*/ folders')
     p.add_argument('--trim', type=float, default=3.0,
                    help='Trim N seconds from each end of each trial')

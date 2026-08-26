@@ -214,15 +214,16 @@ def make_plot(qc, trim_seconds, save_path=None):
         plt.show()
 
 
-DEFAULT_XDF = ("/Users/maccamardo/HITLO_Data/sub-P062/ses-S001/eeg/"
-               "sub-P062_ses-S001_task-Pre_run-002_eeg.xdf")
-DEFAULT_REPO = "/Users/maccamardo/HITLO_Symmetry"
+# No default recording: pass one explicitly. A hard-coded path here only ever
+# worked on one machine, and silently plotting someone else's trial is worse
+# than a clear error.
+DEFAULT_REPO = str(Path(__file__).resolve().parent.parent)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Standalone heel-strike QC plot from an XDF.")
-    ap.add_argument("xdf", nargs="?", default=DEFAULT_XDF,
-                    help="Path to the .xdf trial file (defaults to the baseline trial)")
+    ap.add_argument("xdf",
+                    help="Path to the .xdf trial file")
     ap.add_argument("--trim", type=float, default=3.0,
                     help="Seconds to trim from each end (default 3.0)")
     ap.add_argument("--repo", default=DEFAULT_REPO,

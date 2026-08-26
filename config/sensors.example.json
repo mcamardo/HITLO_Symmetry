@@ -1,0 +1,5 @@
+{
+  "_comment": "Polar H10 BLE device IDs, one per side. Find yours with apps/collect_sensors.py --scan, then copy this file to config/sensors.json.",
+  "left": "XXXXXXXX",
+  "right": "YYYYYYYY"
+}
