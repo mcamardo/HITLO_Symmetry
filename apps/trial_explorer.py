@@ -32,7 +32,10 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from hitlo.io import load_streams, sensing_config
+from hitlo.io import (load_streams, load_trigno_segment, sensing_config,
+                      trigno_inventory)
+from hitlo.ankle_angle import (ankle_angle, stride_profile, verify_foot_side,
+                               find_calibration_window)
 from hitlo.detectors import detect, detector_name
 from hitlo.symmetry import compute_step_times, compute_symmetry_index
 
@@ -338,3 +341,133 @@ if len(EV) == 2:
                "missed strike, not a timing disagreement. The gyro genuinely "
                "leads the accelerometer — it marks contact, the accelerometer "
                "marks the impact that follows.")
+
+
+# ---- ankle angle (only when a foot sensor is present) ----------------------
+st.markdown("---")
+st.subheader("Ankle angle")
+
+inv = {}
+if backend == "trigno":
+    try:
+        inv = trigno_inventory(choice)
+    except Exception:
+        inv = {}
+foot_sides = [sd for sd, segs in inv.items() if "foot" in segs]
+
+if not foot_sides:
+    st.info(
+        "**No foot sensor in this recording**, so ankle angle is not available. "
+        "Everything above is unaffected — step time and the symmetry index need "
+        "only the two shank sensors.\n\n"
+        "Ankle angle needs a foot **and** a shank IMU on the same leg: the angle "
+        "is the difference between the two segments' orientations."
+        + ("" if backend == "trigno" else
+           "\n\n(The Polar backend has no foot sensor and no gyroscope, so this "
+           "is Trigno-only.)"))
+else:
+    fside = (st.selectbox("Foot sensor", foot_sides, key="fside")
+             if len(foot_sides) > 1 else foot_sides[0])
+    other = "left" if fside == "right" else "right"
+
+    foot = load_trigno_segment(choice, fside, "foot")
+    sh_same = load_trigno_segment(choice, fside, "shank")
+    sh_other = load_trigno_segment(choice, other, "shank")
+
+    if foot is None or sh_same is None or sh_other is None:
+        st.warning(f"A `{fside}_foot` sensor is present but one of the shanks "
+                   f"is missing, so the pair cannot be formed.")
+    else:
+        chk = verify_foot_side(foot, sh_same, sh_other)
+        pair_side = fside
+        if not chk["agrees"]:
+            st.error(
+                f"**This foot sensor is not on the leg its label claims.** Its "
+                f"motion is in phase with the **{other}** shank "
+                f"({chk['lag_other_s']*1000:+.0f} ms) and half a stride from the "
+                f"**{fside}** shank ({chk['lag_same_s']*1000:+.0f} ms).\n\n"
+                f"A foot and the shank above it swing together, so this is a "
+                f"labelling error in the bridge, not a gait finding. Pairing on "
+                f"the label would compute the angle between two segments that "
+                f"never move together — large, smooth, and meaningless.")
+            pair_side = other if st.checkbox(
+                f"Pair with the **{other}** shank instead (recommended)",
+                value=True, key="fixpair") else fside
+        else:
+            st.success(f"Foot sensor confirmed on the **{fside}** leg "
+                       f"({chk['lag_same_s']*1000:+.0f} ms from its own shank, "
+                       f"{chk['lag_other_s']*1000:+.0f} ms from the other).")
+
+        shank = sh_same if pair_side == fside else sh_other
+        cal = find_calibration_window(shank)
+        try:
+            res = ankle_angle(foot, shank)
+        except Exception as e:
+            st.warning(f"Could not compute ankle angle: {e}")
+            res = None
+
+        if res is not None:
+            ta, ang = res["t"], res["angle"]
+            if res["zero"] == "standing":
+                st.caption(f"Calibrated on quiet standing "
+                           f"{res['calib'][0]:.0f}–{res['calib'][1]:.0f} s. "
+                           f"{res['note']}")
+            else:
+                st.warning(res["note"])
+
+            m = "gyro" if "gyro" in EV else list(EV)[0]
+            hs = EV[m]["R" if pair_side == "right" else "L"]
+            prof = stride_profile(ang, ta, hs)
+
+            g1, g2 = st.columns([1.1, 1])
+            with g1:
+                f4 = go.Figure()
+                w = (ta >= W0) & (ta <= W1)
+                f4.add_trace(go.Scatter(x=ta[w], y=ang[w], name="ankle angle",
+                                        line=dict(color="#1d3557", width=1.6)))
+                for x in hs[:200]:
+                    f4.add_vline(x=x, line=dict(color=MUTE, width=0.8, dash="dot"))
+                f4.add_hline(y=0, line=dict(color=INK, width=1.2, dash="dot"))
+                f4.update_layout(height=340, margin=dict(l=50, r=20, t=20, b=40),
+                                 plot_bgcolor="white", xaxis_title="time (s)",
+                                 yaxis_title="ankle angle (deg), dorsiflexion +",
+                                 showlegend=False)
+                f4.update_xaxes(gridcolor=GRID); f4.update_yaxes(gridcolor=GRID)
+                st.plotly_chart(f4, use_container_width=True)
+                st.caption("Dotted lines are heel strikes from the detector above.")
+            with g2:
+                if prof is None:
+                    st.info("Too few clean strides for a stride-averaged profile.")
+                else:
+                    mu, sd = prof["mean"], prof["sd"]
+                    pc = np.arange(101)
+                    f5 = go.Figure()
+                    f5.add_trace(go.Scatter(x=np.concatenate([pc, pc[::-1]]),
+                                            y=np.concatenate([mu + sd, (mu - sd)[::-1]]),
+                                            fill="toself", fillcolor="rgba(29,53,87,0.18)",
+                                            line=dict(width=0), showlegend=False,
+                                            hoverinfo="skip"))
+                    f5.add_trace(go.Scatter(x=pc, y=mu, line=dict(color="#1d3557", width=3),
+                                            name="mean"))
+                    f5.add_hline(y=0, line=dict(color=INK, width=1.2, dash="dot"))
+                    f5.update_layout(height=340, margin=dict(l=50, r=20, t=20, b=40),
+                                     plot_bgcolor="white",
+                                     xaxis_title="% of gait cycle",
+                                     yaxis_title="ankle angle (deg)",
+                                     showlegend=False)
+                    f5.update_xaxes(gridcolor=GRID); f5.update_yaxes(gridcolor=GRID)
+                    st.plotly_chart(f5, use_container_width=True)
+                    k1 = int(np.argmax(mu[:65])); k2 = int(np.argmin(mu))
+                    st.caption(
+                        f"{prof['n']} strides · peak dorsiflexion {mu[k1]:+.1f}° at "
+                        f"{k1}% · peak plantarflexion {mu[k2]:+.1f}° at {k2}% · "
+                        f"ROM {np.ptp(mu):.1f}° · between-stride sd {sd.mean():.1f}°")
+
+            st.caption(
+                ":warning: **Shape and timing are validated against published gait "
+                "kinematics; the magnitudes are not.** Range of motion comes out "
+                "~17–20° against a literature 25–30°, most likely because a sensor "
+                "taped to a shoe deforms at push-off in a way one strapped to bone "
+                "does not. There is no goniometer or motion-capture reference "
+                "behind this. Ankle angle is offline only — nothing here reaches "
+                "the optimizer.")

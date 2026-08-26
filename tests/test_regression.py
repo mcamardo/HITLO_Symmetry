@@ -320,6 +320,45 @@ def test_gyro_detector_finds_known_contacts():
     return f"all contacts recovered in 6 regimes, worst median error {worst:.1f} ms"
 
 
+def test_foot_sensor_side_check_catches_a_swap():
+    """A foot swings with the shank above it, not the one across from it.
+
+    Guards a real labelling failure: a sensor recorded as left_foot was
+    physically on the right foot for a whole session. Pairing on the label
+    computes the angle between two segments that never move together, which
+    comes out large, smooth, and completely wrong -- exactly the kind of
+    result that looks like a finding.
+
+    Synthesises two shanks half a stride apart and a foot locked to one of
+    them, then checks the phase test picks the right leg either way.
+    """
+    from hitlo.ankle_angle import verify_foot_side
+    from hitlo.io import SensorStream
+    fs, stride, n = 148.0, 1.2, int(40 * 1.2 * 148)
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(3)
+
+    def limb(phase, amp=250.0):
+        w = amp * np.sin(2 * np.pi * (t / stride - phase))
+        w += 0.35 * amp * np.sin(4 * np.pi * (t / stride - phase))
+        g = np.zeros((n, 3)); g[:, 2] = w + rng.normal(0, 4, n)
+        a = np.zeros((n, 3)); a[:, 1] = 1.0 + rng.normal(0, .02, n)
+        return SensorStream(name="s", timestamps=t + 1000.0, accel=a, gyro=g,
+                            actual_fs=fs)
+
+    left, right = limb(0.0), limb(0.5)
+    for truth, same, other in (("left", left, right), ("right", right, left)):
+        foot = limb(0.0 if truth == "left" else 0.5, amp=320.0)
+        ok = verify_foot_side(foot, same, other)
+        assert ok["agrees"], (
+            f"foot on {truth} not recognised: lag to own shank "
+            f"{ok['lag_same_s']*1000:.0f} ms vs other {ok['lag_other_s']*1000:.0f} ms")
+        swapped = verify_foot_side(foot, other, same)
+        assert not swapped["agrees"], (
+            f"a swapped pairing was accepted for the {truth} foot")
+    return "correct pairing accepted, swapped pairing rejected, both legs"
+
+
 def test_gyro_polarity_prefers_the_larger_lobe():
     """Mid-swing is the fastest rotation in the cycle, so it is the larger lobe.
 
