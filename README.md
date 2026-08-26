@@ -2,13 +2,16 @@
 
 Symmetry-based cost function for human-in-the-loop Bayesian optimization of a
 passive ankle exoskeleton, built on top of Dr. Myunghee Kim's HIL_toolkit.
-Optimizes spring parameters (**L₀** rest length, **attach** foot attachment)
-using shank-mounted IMU gait symmetry as the cost signal — developed for
-post-stroke gait rehabilitation.
+Optimizes a single **unified stiffness index** — one number spanning
+dorsiflexor-assist through zero torque to plantarflexor-assist — using
+shank-mounted IMU gait symmetry as the cost signal. Developed for post-stroke
+gait rehabilitation.
 
 **Platform:** LegExoNET passive ankle exoskeleton (spring-pulley mechanism)  
-**Sensors:** Two Polar H10 accelerometers, shank-mounted bilaterally  
-**Parameterization:** (L₀, attach) with R = 0.28 m fixed
+**Sensors:** Shank-mounted IMUs, bilateral — Delsys Trigno Avanti (accel +
+gyro, ~148 Hz) or Polar H10 (accel only, ~200 Hz), selected by config  
+**Search space:** one index `x ∈ [−1, +1]`, each value resolving through a
+pre-validated table to the four settings the operator dials in
 
 ---
 
@@ -21,10 +24,12 @@ acquisition) and Polar H10 BLE streaming utilities.
 
 **HITLO_Symmetry contributes on top of that foundation:**
 - Custom cost function based on step-time symmetry (not metabolic cost)
-- Two-sensor shank-mounted IMU heel-strike detection pipeline
+- Two-sensor shank-mounted IMU heel-strike detection, accelerometer or
+  gyroscope, behind one interface so the optimizer is sensor-agnostic
 - Streamlit experimenter UI (baseline-relative targeting, bidirectional HILBO)
 - Exoskeleton-specific spring penalty and safety constraints
-- (L0, attach) parameterization for intuitive device tuning
+- A unified 1-D stiffness index as the BO axis, replacing a multi-parameter
+  search with one physically ordered knob
 
 ---
 
@@ -51,14 +56,26 @@ walkthrough including hardware setup and troubleshooting.
 ## Quick start
 
 ```bash
-# 1. Connect the two Polar H10 sensors (in separate terminals)
-python apps/collect_sensors.py right
-python apps/collect_sensors.py left
-
-# 2. Open LabRecorder, confirm both streams visible, click Update
-
-# 3. Start the experiment UI
+# Everything runs from the console — sensor setup, checks, trials, results.
 streamlit run apps/hitlo_console.py
+```
+
+The console's **Sensors** page adapts to the backend in your config:
+
+- **trigno** — pairing happens in the Trigno Control Utility on the
+  base-station machine; the page verifies the LSL stream, channel labels,
+  rate and host, and runs a shake test to confirm the side mapping
+- **polar** — scans for the two H10 straps over BLE, assigns sides and
+  starts one process per sensor
+
+Standalone tools, if you prefer the terminal:
+
+```bash
+./apps/preflight.py             # pre-session readiness check
+./apps/verify_sides.py          # confirm which stream is which leg
+./apps/diagnose_trial.py FILE   # per-trial QC plots
+./apps/compare_detectors.py FILE  # accel vs gyro on the same recording
+python apps/collect_sensors.py right    # Polar backend only
 ```
 
 See [docs/workflow.md](docs/workflow.md) for the full experiment-day procedure.
@@ -70,16 +87,25 @@ See [docs/workflow.md](docs/workflow.md) for the full experiment-day procedure.
 ```
 HITLO_Symmetry/
 ├── hitlo/                         # core library (import this)
-│   ├── detection.py               # heel-strike detection pipeline
+│   ├── detection.py               # accelerometer detection (jerk peaks + clustering)
+│   ├── detection_gyro.py          # gyroscope detection (swing peak -> zero crossing)
+│   ├── detectors.py               # dispatcher — picks the method from config
 │   ├── symmetry.py                # step-time interleaving + SI computation
 │   ├── cost.py                    # BO cost function (SymmetryCost class)
-│   ├── io.py                      # XDF loading, trial-file naming
+│   ├── io.py                      # XDF/LSL loading for both backends, file naming
+│   ├── index_unified.py           # unified stiffness index (the BO's x axis)
+│   ├── plot_heelstrikes.py        # shared detection plotting
 │   └── hil_exo.py                 # HIL_Exo experiment driver (wraps HIL_toolkit's BO)
 │
 ├── apps/                          # user-facing tools
-│   ├── hitlo_console.py           # Streamlit UI for live BO trials (MAIN)
+│   ├── hitlo_console.py           # Streamlit console — the main interface
+│   ├── preflight.py               # pre-session readiness check
+│   ├── verify_sides.py            # confirm stream-to-leg mapping
 │   ├── diagnose_trial.py          # standalone trial QC plotter
-│   └── collect_sensors.py         # BLE sensor startup script
+│   ├── compare_detectors.py       # accel vs gyro on one recording
+│   ├── check_placement.py         # compare sensor mountings empirically
+│   ├── session.py                 # session/checkpoint helpers
+│   └── collect_sensors.py         # Polar BLE sensor startup script
 │
 ├── scripts/                       # batch / dev utilities
 │   └── analyze_experiment.py      # full post-hoc session analysis
@@ -90,31 +116,47 @@ HITLO_Symmetry/
 ├── docs/                          # extended documentation
 │   ├── getting_started.md         # 10-minute setup + first run guide
 │   ├── workflow.md                # experiment-day procedure
-│   ├── detection_pipeline.md      # algorithm details + references
+│   ├── detection_pipeline.md      # accelerometer algorithm + references
+│   ├── gyro_detection.md          # gyroscope algorithm + what a bridge must provide
 │   └── porting_to_other_devices.md  # adapting to non-LegExoNET devices
 │
-└── tests/                         # unit tests (currently minimal)
+└── tests/                         # regression suite (./tests/test_regression.py)
 ```
 
 ---
 
 ## What this code does
 
-Each trial, the BO loop (from HIL_toolkit) suggests a new `(L0, attach)` pair:
+Each trial, the BO loop (from HIL_toolkit) suggests one number, `x ∈ [−1, +1]`:
 
-- **L₀** (0.32–0.44 m) — spring rest length; controls engagement timing
-- **attach** (−0.2 to +1.0) — foot attachment ratio; controls torque direction
-  - Negative → plantarflexor-assist (longer paretic step time)
-  - Positive → dorsiflexor-assist (exaggerated deficit, error-augmentation)
-- **R** (0.28 m, fixed) — anchor distance from ankle center; controls moment arm
+- `x = −1` — maximum dorsiflexor stiffness (limited by the band ceiling)
+- `x =  0` — zero torque
+- `x = +1` — maximum plantarflexor stiffness (limited by the torque cap)
+
+Each `x` resolves through `config/index_unified.csv` into the four physical
+values the operator sets on the device: anchor distance **R**, angle
+**theta**, spring rest length **L₀**, and foot **attachment ratio**. Every row
+of that table is a pre-validated survivor of a 4-D sweep against the sign,
+torque-cap, engagement and edge-cliff filters, so safety lives in the table
+rather than in a runtime check.
+
+Two properties of the index are load-bearing and easy to get wrong:
+
+- **Never interpolate between rows.** Adjacent rows can differ wildly in every
+  parameter; averaging two produces a configuration that passed none of the
+  filters. Always snap to a row.
+- **`x` is not uniformly spaced.** The two arms carry different level counts,
+  so dorsiflexor steps are wider than plantarflexor steps. Match on nearest
+  value in the `x` column; never compute a row position arithmetically.
 
 The experimenter physically adjusts the exoskeleton to those values, and the
-participant walks for 60 seconds while two shank-mounted Polar H10 sensors
-stream acceleration over Bluetooth (via LSL). After the trial,
+participant walks for 60 seconds while two shank-mounted IMUs stream over LSL.
+After the trial,
 `hitlo.cost.SymmetryCost.extract_cost_from_file()`:
 
 1. Loads the XDF recording (via `hitlo.io`)
-2. Runs the detection pipeline on each shank signal (`hitlo.detection`)
+2. Runs heel-strike detection on each shank signal (`hitlo.detectors`
+   dispatches to the accelerometer or gyroscope method)
 3. Interleaves left/right heel strikes → step times → symmetry index (SI) (`hitlo.symmetry`)
 4. Adds a spring-shape penalty (prefers physiologic torque profiles)
    weighted by `lambda_pf` (plantarflexor) and `mu_df` (dorsiflexor) in config
@@ -124,20 +166,41 @@ The GP-based BO picks the next suggestion to minimize distance to the target SI.
 
 ---
 
-## Detection pipeline (one-paragraph summary)
+## Detection pipelines
 
-Raw tri-axial acceleration → magnitude `|a| = sqrt(x² + y² + z²)` → 50 Hz
-lowpass Butterworth (filtfilt, zero phase delay) → differentiate → z-score.
-The 50 Hz cutoff sits well above the heel-strike impact band (5–30 Hz), so
-the lowpass acts as light noise cleanup rather than reshaping the impact.
-Candidate peaks detected on jerk z-score with a strict threshold (0.7 SD) and
-a gap-fill recovery pass (1.8 SD in anomalously long gaps). Candidates
+Two methods, one interface. `hitlo.detectors.detect()` picks between them from
+the config, so the cost function and optimizer never know which ran.
+
+**Accelerometer** (`hitlo/detection.py`) — raw tri-axial acceleration →
+magnitude `|a| = sqrt(x² + y² + z²)` → 50 Hz lowpass Butterworth (filtfilt,
+zero phase) → differentiate → z-score. The 50 Hz cutoff sits well above the
+heel-strike impact band (5–30 Hz), so the lowpass is light noise cleanup
+rather than reshaping the impact. Candidate peaks on jerk z-score at 1.3 SD,
 grouped into gait-cycle clusters (peaks within 0.5 s). Within each cluster,
-scan from the last peak backwards; pick the first one that is (a) above
-gravity baseline (not a free-fall trough) AND (b) followed by a stance region
-(flat signal near baseline). That's the heel strike. Each cluster emits
-exactly one heel strike (or zero if nothing qualifies). Edge singletons
-dropped; trial ends trimmed 3 seconds each way.
+scan back from the last peak and take the first that is above gravity
+baseline and followed by a stance region. Each cluster emits at most one heel
+strike. Edge singletons dropped; trial ends trimmed 3 s each way.
+
+**Gyroscope** (`hitlo/detection_gyro.py`) — sagittal shank angular velocity,
+bandpassed, oriented so mid-swing is positive. Contact is the first
+negative-going zero crossing after each mid-swing peak, refined by sub-sample
+interpolation and confirmed by a reversal check. Peak spacing adapts to the
+subject's own cadence, with the stride estimated by autocorrelation rather
+than from detected events (deriving it from detections is circular).
+
+**Which to prefer.** At 148 Hz the accelerometer's heel-strike impact spans
+only ~2 samples and its peak amplitude varies ~25% stride to stride, so a soft
+strike can fall below threshold and be missed. The gyroscope's mid-swing
+feature spans ~39 samples with ~10% amplitude variation, so it is far better
+resolved at this sample rate and misses fewer strides. The gyro path is the
+default for Trigno; Polar hardware has no gyroscope and uses the
+accelerometer.
+
+**They are not interchangeable measurements.** The gyro marks initial contact;
+the accelerometer marks the impact shock that follows it, roughly 40–110 ms
+later. A symmetry index from one cannot be compared against a baseline
+collected with the other — switching detector mid-study means re-baselining.
+`apps/compare_detectors.py` quantifies the offset on your own recordings.
 
 Symmetry index follows the standard form `SI = 2 × (R - L) / (R + L) × 100%`
 where `R, L` are mean step times. Can be signed (captures asymmetry direction)
@@ -163,19 +226,25 @@ Subject:
   session: S001                               # session code
   base_dir: /path/to/HITLO_Data               # data root
 
+Sensing:
+  backend: trigno                             # trigno | polar
+  detector: gyro                              # gyro | accel (defaults per backend)
+  stream: TrignoIMU                           # LSL stream name (trigno only)
+
 Cost:
   aim: Aim 1                                  # "Aim 1" (healthy) or "Aim 2" (stroke)
-  sample_rate: 200                            # Polar H10 sampling rate (Hz)
+  sample_rate: 148                            # sensor rate (Hz): 148 Trigno, 200 Polar
   time: 90                                    # trial duration (seconds)
   signed: true                                # use signed SI (required for both aims)
   si_target: -10.0                            # fallback target (baseline phase overrides)
   trim_seconds: 3.0                           # trim from each end (steady-state window)
 
 Optimization:
-  n_parms: 2                                  # always 2 (L0, attach)
-  n_steps: 15                                 # total trials
-  n_exploration: 5                            # LHS exploration trials
-  range: [[0.32, -0.2], [0.44, 1.0]]        # [L0_min, attach_min], [L0_max, attach_max]
+  index_csv: config/index_unified.csv         # x -> (R, theta, L0, attach) table
+  n_parms: 1                                  # always 1 (the unified index)
+  range: [[-1.0], [1.0]]                      # x spans DF-assist to PF-assist
+  n_steps: 15                                 # total trials, including the ramp
+  manual_ramp_trials: 5                       # first N trials follow ramp_sequence
   
   # Safety constraints (hard limits, always enforced)
   max_pf_torque_nm: 90.0                      # max plantarflexor torque (Nm)
@@ -222,7 +291,11 @@ principle).
 
 ## Versioning
 
-- **v2.2.0** (current) — (L0, attach) parameterization with R = 0.28 m fixed;
+- **v2.3.0** (current) — second sensor backend (Delsys Trigno Avanti) and
+  gyroscope heel-strike detection, both selectable by config with the Polar +
+  accelerometer path kept intact; unified stiffness index as the BO axis;
+  console reworked around per-backend setup and preflight
+- **v2.2.0** — (L0, attach) parameterization with R = 0.28 m fixed;
   bidirectional HILBO for stroke; baseline-relative targeting for healthy;
   hard torque constraints with safety fallback
 - **v2.1.0** — switched to filter-then-diff at 50 Hz cutoff; tightened cluster-gap
@@ -234,13 +307,21 @@ principle).
 
 ## Hardware
 
-- LegExoNET passive ankle exoskeleton (spring-pulley mechanism, ~$5k)
-- 2× Polar H10 chest straps → worn on shanks with Coban wrap (~$180)
+- LegExoNET passive ankle exoskeleton (spring-pulley mechanism)
+- Shank IMUs, one of:
+  - **Delsys Trigno Avanti** — accel + gyro, ~148 Hz, published to LSL as one
+    multiplexed stream by a bridge on the base-station machine. Channel labels
+    carry side and segment (`left_shank_gyr_z`, `right_foot_acc_x`, …), which
+    is how `hitlo.io` demultiplexes them. A third sensor on the foot is
+    optional and is carried but not used by the cost function.
+  - **Polar H10** ×2 — chest straps worn on the shanks with Coban wrap;
+    accelerometer only, ~200 Hz, one LSL stream per side over BLE
 - Mac laptop with LabRecorder, LSL, Python 3.9+
 
-Sensor IDs (customize for your hardware):
-- Left shank: `7F302C25`
-- Right shank: `80AE3629`
+Sensor identifiers are configuration, not code — set them in
+`exo_symmetry_config.yml` (Trigno: slot-to-label mapping in the bridge;
+Polar: BLE device IDs). Always confirm the side mapping with
+`./apps/verify_sides.py` or the console's shake test before a session.
 
 ---
 

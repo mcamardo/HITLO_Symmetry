@@ -24,7 +24,7 @@ Subject:
   session: S001
   # Root of the BIDS-ish data tree. Trials are read from and written to
   # <base_dir>/sub-<id>/ses-<session>/eeg/
-  base_dir: /Users/maccamardo/HITLO_Data
+  base_dir: ~/HITLO_Data
 
 Sensing:
   # Which hardware produced the recording, and how to find heel strikes in it.
