@@ -65,6 +65,22 @@ def make_subject(kind: str, baseline: float, gain: float, noise: float,
         # Nothing happens until the band engages -- slack at low stiffness.
         f = lambda x: baseline + gain * np.sign(x) * np.clip(abs(x) - 0.3, 0, None) / 0.7
         doc = f"no effect for |x| < 0.3, then linear   (band slack)"
+    elif kind == "table":
+        # Drive the response off the table's own dose_signed_Nm rather than an
+        # invented shape. This is the only model tied to the actual device: it
+        # carries the real ~17x asymmetry between the arms, where the whole
+        # dorsiflexor side can apply at most ~2.7 Nm against the
+        # plantarflexor side's ~47.
+        import pandas as pd
+        from pathlib import Path as _P
+        _df = pd.read_csv(_P(__file__).resolve().parent.parent /
+                          "config" / "index_unified.csv").sort_values("x")
+        _x, _d = _df["x"].to_numpy(), _df["dose_signed_Nm"].to_numpy()
+        _scale = gain / max(abs(_d).max(), 1e-9)
+        f = lambda x: baseline + _scale * np.interp(x, _x, _d)
+        doc = (f"SI = {baseline:+.1f} + dose(x) scaled so full PF = {gain:+.1f}%"
+               f"   (real table dose, DF arm reaches only "
+               f"{abs(_d[_d < 0]).max() / abs(_d).max() * gain:.1f}%)")
     else:
         raise ValueError(f"unknown response model: {kind}")
 
@@ -165,7 +181,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--response", default="saturating",
-                    choices=["linear", "saturating", "sweet_spot", "deadzone"])
+                    choices=["table", "linear", "saturating", "sweet_spot",
+                             "deadzone"])
     ap.add_argument("--baseline", type=float, default=-5.0,
                     help="simulated subject's SI at zero torque (%%)")
     ap.add_argument("--gain", type=float, default=14.0,
