@@ -46,3 +46,8 @@ config/exo_symmetry_config.yml
 # Personal working state — the tracked template is exo_symmetry_config.example.yml
 config/exo_symmetry_config.yml.*-backup
 config/sensors.json
+
+# Editor / session cruft
+.Rhistory
+.RData
+.DS_Store
