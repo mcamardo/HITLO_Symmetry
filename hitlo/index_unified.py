@@ -43,10 +43,22 @@ class IndexTable:
 
     def __init__(self, csv_path: str) -> None:
         path = Path(csv_path).expanduser()
+        if not path.is_file() and not path.is_absolute():
+            # Configs carry a repo-relative path ("config/index_unified.csv"),
+            # which only resolves when the cwd happens to be the repo root.
+            # Launch the console from anywhere else and the whole session dies
+            # at construction with a file-not-found. Fall back to resolving
+            # against the package location, which does not move.
+            candidate = Path(__file__).resolve().parent.parent / path
+            if candidate.is_file():
+                path = candidate
         if not path.is_file():
             raise FileNotFoundError(
-                f"Index table not found: {path}\n"
-                f"Run build_index_unified.m and copy index_unified.csv here."
+                f"Index table not found: {csv_path}\n"
+                f"Looked in the working directory ({Path.cwd()}) and in the "
+                f"repo ({Path(__file__).resolve().parent.parent}).\n"
+                f"Run build_index_unified.m and copy index_unified.csv to "
+                f"config/."
             )
         self.path = path
         self.df = pd.read_csv(path)
