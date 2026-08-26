@@ -36,6 +36,8 @@ gait-event method (e.g. Aminian 2002; Salarian 2004), widely validated
 against force plates and footswitches.
 """
 
+import warnings
+
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
@@ -117,6 +119,12 @@ class GyroDetectionConfig:
     # while being identical physically.
     min_reversal_frac: float = 0.08
     reversal_window_s: float = 0.15   # floor, and used before stride is known
+
+    # Polarity is taken from the larger lobe (mid-swing is the fastest
+    # rotation in the cycle). Real shank recordings show lobe ratios of
+    # 1.14-1.82, so this is decisive; below this ratio the amplitudes carry
+    # no information and the detector falls back to the event-count rule.
+    lobe_ratio_min: float = 1.05
 
     def with_fs(self, fs: float) -> "GyroDetectionConfig":
         from dataclasses import replace
@@ -337,25 +345,55 @@ def detect_heelstrikes_gyro(gyro: np.ndarray,
     # swing -- every event lands at the wrong point in the cycle, while
     # still looking like a clean periodic detection.
     #
-    # Rather than infer it from which excursion is larger (which fails
-    # whenever the two lobes are comparable, and decides on noise when they
-    # are equal), run BOTH polarities and keep the one that produces more
-    # events, breaking ties on how evenly spaced they are. Gait is strongly
-    # periodic, so the correct orientation is self-evident from the result.
+    # Orient so that MID-SWING IS POSITIVE, identified as the larger lobe.
+    # Mid-swing is the fastest rotation in the gait cycle; the stance-phase
+    # reversal is always smaller.
+    #
+    # This previously chose the polarity that produced MORE events, tying on
+    # regularity. That is wrong twice over. Both orientations of a periodic
+    # signal give similarly many, similarly regular events, so the criterion
+    # cannot discriminate -- and the count tiebreak is backwards, because the
+    # WRONG lobe yields more events (the stance reversal region contributes
+    # extra zero crossings). Measured against accelerometer heel strikes on
+    # sub-P012/ses-S001, the old rule picked the wrong lobe on 16 of 16 legs
+    # across 8 trials, putting every event 468-647 ms early -- about a third
+    # of a cycle, near toe-off rather than contact. Orienting by magnitude
+    # gives -77 to -113 ms on the same 16 legs (the crossing genuinely
+    # precedes the impact peak the accelerometer sees).
     # ------------------------------------------------------------------
     if cfg.swing_sign is not None:
         first = _detect_one_polarity(w, t, cfg)
         oriented = w
     else:
-        pos = _detect_one_polarity(w, t, cfg)
-        neg = _detect_one_polarity(-w, t, cfg)
-        n_pos, n_neg = len(pos.heel_strike_times), len(neg.heel_strike_times)
-        if n_pos == n_neg:
-            use_pos = (_regularity(pos.heel_strike_times) <=
-                       _regularity(neg.heel_strike_times))
+        hi, lo = float(np.max(w)), abs(float(np.min(w)))
+        ratio = max(hi, lo) / max(min(hi, lo), 1e-9)
+        if ratio >= cfg.lobe_ratio_min:
+            oriented = -w if lo > hi else w
+            first = _detect_one_polarity(oriented, t, cfg)
         else:
-            use_pos = n_pos > n_neg
-        first, oriented = (pos, w) if use_pos else (neg, -w)
+            # Lobes too close to call. Magnitude would be deciding on noise
+            # here, and a wrong choice shifts every event by a third of a
+            # cycle -- so fall back to running both and keeping whichever
+            # yields more events, tying on regularity. That criterion is a
+            # poor discriminator on real gait (see above) but it is the only
+            # thing left when the amplitudes carry no information.
+            pos = _detect_one_polarity(w, t, cfg)
+            neg = _detect_one_polarity(-w, t, cfg)
+            n_pos, n_neg = len(pos.heel_strike_times), len(neg.heel_strike_times)
+            if n_pos == n_neg:
+                use_pos = (_regularity(pos.heel_strike_times) <=
+                           _regularity(neg.heel_strike_times))
+            else:
+                use_pos = n_pos > n_neg
+            first, oriented = (pos, w) if use_pos else (neg, -w)
+            warnings.warn(
+                f"gyro polarity is ambiguous: swing and stance lobes differ by "
+                f"only {100 * (ratio - 1):.1f}% ({hi:.0f} vs {lo:.0f} deg/s), "
+                f"below the {cfg.lobe_ratio_min:.2f} needed to orient by "
+                f"magnitude. Fell back to the event-count rule, which picked "
+                f"the wrong lobe on all 16 real legs tested. Set swing_sign "
+                f"explicitly if the timing looks wrong.",
+                RuntimeWarning, stacklevel=2)
 
     # Second pass at the subject's own cadence. The first pass only needs to
     # be good enough to estimate the stride; spacing derived from it then

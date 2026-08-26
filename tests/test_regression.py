@@ -302,6 +302,40 @@ def test_gyro_detector_finds_known_contacts():
     return f"all contacts recovered in 6 regimes, worst median error {worst:.1f} ms"
 
 
+def test_gyro_polarity_prefers_the_larger_lobe():
+    """Mid-swing is the fastest rotation in the cycle, so it is the larger lobe.
+
+    This is the regression guard for a real bug. The detector used to choose
+    polarity by which orientation produced MORE events, tying on regularity.
+    Both orientations of a periodic signal give similarly many, similarly
+    regular events, so that criterion cannot discriminate -- and the count
+    tiebreak is backwards, because the WRONG lobe yields more events (the
+    stance reversal contributes extra zero crossings). Measured against
+    accelerometer heel strikes on sub-P012/ses-S001 it picked the wrong lobe
+    on 16 of 16 legs, putting every event ~480 ms early: near toe-off rather
+    than contact. Step-time symmetry survived that (a shared offset cancels)
+    but every gait-phase result built on it was a third of a cycle wrong.
+    """
+    from hitlo.detection_gyro import GyroDetectionConfig, detect_heelstrikes_gyro
+    cfg = GyroDetectionConfig(fs=148)
+    # stance_frac 0.35 -> swing lobe is ~3x the stance lobe, as in real shank
+    # data (measured ratios 1.14-1.82). Feed both mountings; contact times
+    # must come back the same either way.
+    got = {}
+    for sign in (+1, -1):
+        g, t, truth = _synth_shank_gyro(sign=sign, stance_frac=0.35)
+        det = np.asarray(detect_heelstrikes_gyro(g, t, cfg=cfg).heel_strike_times)
+        assert len(det) == len(truth), (
+            f"sign={sign:+d}: found {len(det)} of {len(truth)}")
+        err = np.median([abs(det[np.argmin(np.abs(det - c))] - c) * 1000
+                         for c in truth])
+        # A wrong-lobe lock lands a third of a stride away (~400 ms at
+        # stride 1.2 s), so this bound separates the two outcomes by 40x.
+        assert err < 10.0, f"sign={sign:+d}: {err:.1f} ms from truth"
+        got[sign] = err
+    return (f"larger lobe wins in both mountings, worst {max(got.values()):.1f} ms")
+
+
 def test_gyro_detector_survives_inverted_mounting():
     """Gyro polarity depends on how the sensor was clipped on.
 
