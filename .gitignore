@@ -51,3 +51,6 @@ config/sensors.json
 .Rhistory
 .RData
 .DS_Store
+
+# HIL_toolkit writes these per BO iteration wherever it is run from
+autoiter_*/
