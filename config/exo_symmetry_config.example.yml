@@ -95,15 +95,19 @@ Optimization:
   n_steps: 15             # total trials, including the ramp
   manual_ramp_trials: 5   # trials 1-N come from ramp_sequence; BO runs after
 
-  # Ramp x values, snapped to real table rows at load. Touch BOTH arms — if
-  # every ramp trial sits on one side, the GP has no data on the other when BO
-  # takes over, and with ~10 BO trials it may never go look.
+  # Ramp x values, snapped to real table rows at load. These must SPAN the
+  # range, not cluster near zero. Two failure modes if they do not:
+  #   - every ramp trial on one arm leaves the GP with no data on the other,
+  #     and with ~10 BO trials it may never go look;
+  #   - a ramp bunched near x=0 samples only a narrow band of torque, so the
+  #     GP's length scale is fitted on a range the experiment then leaves.
+  # tests/test_regression.py::test_ramp_spans_the_torque_range enforces this.
   ramp_sequence:
-  - 0.0
-  - 0.2
-  - -0.2
-  - 0.4
-  - -0.4
+  - -1.0                  # max dorsiflexor assist
+  - 0.0                   # zero torque
+  - 0.3
+  - 0.6333333333333333
+  - 1.0                   # max plantarflexor assist
 
   device: cpu
   normalize: true         # map x to [0,1] for GP numerical stability

@@ -48,6 +48,24 @@ def _synthetic_gait(n=8000, fs=200.0, step_s=0.6, amp=3000.0):
 
 # ---------------------------------------------------------------------------
 
+def _load_config():
+    """The live config if present, else the tracked example.
+
+    exo_symmetry_config.yml is gitignored personal state, so a fresh clone --
+    or CI -- will not have it. Falling back to the example keeps these tests
+    runnable by anyone, and stops the suite from silently depending on one
+    machine's settings.
+    """
+    import yaml
+    for name in ('exo_symmetry_config.yml', 'exo_symmetry_config.example.yml'):
+        p = REPO / 'config' / name
+        if p.exists():
+            return yaml.safe_load(p.read_text())
+    raise FileNotFoundError(
+        "no config found: expected config/exo_symmetry_config.yml or "
+        "config/exo_symmetry_config.example.yml")
+
+
 def test_dtype_invariance():
     """int16 accel must give byte-identical results to float.
 
@@ -101,7 +119,7 @@ def test_index_table_ramp_snaps_exactly():
     builder's safety filters.
     """
     import yaml
-    cfg = yaml.safe_load((REPO / 'config' / 'exo_symmetry_config.yml').read_text())
+    cfg = _load_config()
     table = IndexTable(str(REPO / cfg['Optimization']['index_csv']))
     for x in cfg['Optimization']['ramp_sequence']:
         snapped = table.snap(float(x))
@@ -174,7 +192,7 @@ def test_ramp_spans_the_torque_range():
     entered BO having never seen most of what the device can do.
     """
     import yaml
-    cfg = yaml.safe_load((REPO / 'config' / 'exo_symmetry_config.yml').read_text())
+    cfg = _load_config()
     table = IndexTable(str(REPO / cfg['Optimization']['index_csv']))
     doses = [table.row(float(v))['dose_Nm'] for v in cfg['Optimization']['ramp_sequence']]
     full = table.df['dose_signed_Nm']

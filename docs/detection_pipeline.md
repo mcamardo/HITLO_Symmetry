@@ -18,7 +18,7 @@ raw tri-axial accel
    → 50 Hz lowpass Butterworth, order 4, filtfilt (zero phase delay)
    → differentiate → jerk = |d|a|/dt|
    → z-score normalization
-   → strict peak detection (0.7 SD jerk)
+   → strict peak detection (1.3 SD jerk)
    → gap-fill recovery (1.8 SD in anomalously long gaps)
    → cluster candidates (peaks within 0.5 s)
    → within each cluster: scan last-to-first, accept the first peak that is
@@ -228,14 +228,16 @@ Peak detection on the z-scored jerk signal proceeds in two passes.
 #### Pass 1 (strict)
 
 ```python
-strict_peaks = find_peaks(jerk_z, height=0.7, distance=20 samples)
+strict_peaks = find_peaks(jerk_z, height=1.3, distance=~15 samples)
 ```
 
-Finds all local maxima above 0.7 standard deviations of jerk, separated by
+Finds all local maxima above 1.3 standard deviations of jerk, separated by
 at least 100 ms.
 
-**Why 0.7 SD (and not 2.5 SD as in earlier versions)?** We *want* to cast a
-wide net here. False positives are tolerable because the cluster-keep-last
+**Why 1.3 SD?** Earlier versions used 2.5 SD (too strict, missed strikes) and
+then 0.7 SD (too loose on Trigno data, where the walking baseline is noisier
+relative to a soft impact). 1.3 is the current compromise. The principle is
+still to cast a wide net: False positives are tolerable because the cluster-keep-last
 stage later will filter them out physiologically. False negatives are
 expensive because every missed heel strike distorts the step-time pattern.
 Strategy: *over-detect now, filter aggressively later.*
@@ -249,12 +251,11 @@ double-counting a single peak that has a small notch at its apex.
 After strict detection, we compute the median interval between detected
 peaks. If we observe a gap that is greater than 1.7× the median, there
 probably was a real heel strike in that window whose jerk happened to fall
-below the strict threshold. We search that window with a higher-threshold
-fallback:
+below the strict threshold. We search that window with a fallback threshold:
 
 ```python
 recovered = find_peaks(jerk_z[gap_start:gap_end],
-                       height=1.8, distance=20 samples)
+                       height=1.8, distance=~15 samples)
 ```
 
 If nothing above 1.8 SD exists in the gap, we leave it alone. We do **not
@@ -263,10 +264,31 @@ interpolate** or fabricate events — only evidence-based detection.
 **Why 1.7× median?** In rhythmic walking, stride-to-stride variation is
 typically <10–15%. A gap 70% longer than median is a strong anomaly signal.
 
-**Why 1.8 SD recovery threshold?** Higher than the strict pass (0.7 SD)
-because we're already committing a lower specificity by looking in
-anomalously long gaps — we want high confidence that any recovered peak
-is genuine.
+> **This stage is inert, and knowingly so.** `recovery_thresh` (1.8) sits
+> *above* `strict_thresh` (1.3), so any peak it could find was already found
+> by pass 1. Measured across all 8 Trigno trials in sub-P012/ses-S001 it
+> recovered **0 peaks**. An earlier version of this document justified the
+> higher value as wanting "high confidence in anomalous gaps"; that rationale
+> does not survive contact with the arithmetic.
+>
+> It has been left inert deliberately rather than simply lowered. Dropping it
+> to 0.4–1.0 does recover peaks, but they are mostly noise: per-stride SI
+> scatter rose from 14.8 to 20.8. The stage is also misconceived at this point
+> in the pipeline — it runs on raw jerk candidates *before* clustering, so its
+> "median interval" is the gap between candidates (~0.9 s on P012), not the
+> stride (~1.44 s). Its notion of an anomalously long gap is therefore not
+> about missing heel strikes at all.
+>
+> Gap-filling the *final* heel-strike list instead does find genuinely missed
+> strikes (disagreements with the gyro detector fell 27 → 14 across the
+> session) but is not safe as a default: on run-004 it moved SI from −23.0% to
+> −9.7% and raised scatter from 27.7 to 36.5. It helps some trials and
+> destroys others.
+>
+> The underlying limitation is not tunable. At 148 Hz a heel-strike impact
+> spans ~2 samples and its sampled amplitude varies ~2.7× between strides; a
+> soft strike registers ~1.2 g against a ~1.0 g walking baseline. No threshold
+> separates that from noise. See [gyro_detection.md](gyro_detection.md).
 
 **Why not just interpolate?** An older pipeline version fabricated events
 at the midpoint of long gaps. This was bug-bait: fabricated events create
