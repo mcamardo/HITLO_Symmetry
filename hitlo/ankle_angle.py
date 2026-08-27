@@ -80,11 +80,16 @@ class AnkleAngleConfig:
     footflat_dps: float = 25.0
 
     # --- functional calibration (see functional_calibration) ---------------
-    # A segment counts as "moving" above func_move_dps and "still" below
-    # func_still_dps. The gap between them is deliberate: samples in between
-    # are unclassified rather than forced into a bin.
-    func_move_dps: float = 30.0
-    func_still_dps: float = 15.0
+    # Both thresholds are measured ABOVE each sensor's own resting floor, not
+    # in absolute deg/s. A real Trigno shank sitting still reads 16-17 deg/s
+    # of bias and noise while the foot beside it reads 9-10, so any fixed
+    # "still" threshold is either below one sensor's floor -- in which case it
+    # can never be still and the calibration is rejected however well it was
+    # performed -- or above the other's real movement. Measured floors avoid
+    # having to guess. The gap between the two is deliberate: samples in
+    # between are unclassified rather than forced into a bin.
+    func_move_dps: float = 25.0     # above the floor to count as moving
+    func_still_dps: float = 9.0     # above the floor to still count as still
     func_min_s: float = 4.0
 
     # PC1 must beat PC2 by this factor for a movement to count as isolating
@@ -640,16 +645,25 @@ def find_movement_segments(foot: SensorStream,
     mf = np.convolve(np.linalg.norm(gf, axis=1), box, mode="same")
     ms = np.convolve(np.linalg.norm(gs, axis=1), box, mode="same")
 
+    # Each sensor's resting floor, from the recording itself. A calibration
+    # spends most of its length with any given segment stationary, so a low
+    # percentile is that segment's own bias-and-noise level.
+    floor_f = float(np.percentile(mf, 10))
+    floor_s = float(np.percentile(ms, 10))
+
     # Rigid motion is not just "both are moving" -- walking is that too, and
     # walking is usually the longest such stretch in the file. Two sensors on
     # one rigid body measure the same angular velocity vector in different
     # frames, so their magnitudes match; across a real ankle they do not.
     agree = np.abs(mf - ms) < 0.25 * np.maximum(mf, ms)
 
+    f_moves, f_still = mf > floor_f + cfg.func_move_dps, mf < floor_f + cfg.func_still_dps
+    s_moves, s_still = ms > floor_s + cfg.func_move_dps, ms < floor_s + cfg.func_still_dps
+
     want = {
-        "foot": (mf > cfg.func_move_dps) & (ms < cfg.func_still_dps),
-        "shank": (ms > cfg.func_move_dps) & (mf < cfg.func_still_dps),
-        "rigid": (ms > cfg.func_move_dps) & (mf > cfg.func_move_dps) & agree,
+        "foot": f_moves & s_still,
+        "shank": s_moves & f_still,
+        "rigid": s_moves & f_moves & agree,
     }
     out: Dict[str, Optional[Tuple[float, float]]] = {}
     for name, mask in want.items():
@@ -659,6 +673,41 @@ def find_movement_segments(foot: SensorStream,
         else:
             out[name] = (float(t[run[0]]), float(t[run[1]]))
     return out
+
+
+def movement_report(foot: SensorStream,
+                    shank: SensorStream,
+                    cfg: AnkleAngleConfig = AnkleAngleConfig(),
+                    ) -> Dict[str, object]:
+    """How much each segment actually moved, against its own resting floor.
+
+    "Part B is missing" is not an actionable message -- it does not say whether
+    the movement was too small, too short, or whether the wrong segment moved.
+    This returns the numbers behind that verdict so the operator can see which.
+    """
+    t, gf, gs, fs = _on_shank_clock(foot, shank)
+    k = max(int(1.0 * fs), 1)
+    box = np.ones(k) / k
+    mf = np.convolve(np.linalg.norm(gf, axis=1), box, mode="same")
+    ms = np.convolve(np.linalg.norm(gs, axis=1), box, mode="same")
+    floor_f, floor_s = float(np.percentile(mf, 10)), float(np.percentile(ms, 10))
+
+    # A 2 s summary is enough to see the shape of a session without printing
+    # thousands of samples.
+    edges = np.arange(0.0, float(t[-1]), 2.0)
+    rows = []
+    for a in edges:
+        m = (t >= a) & (t < a + 2.0)
+        if m.sum() < 5:
+            continue
+        rows.append(dict(t=float(a),
+                         foot=float(mf[m].mean() - floor_f),
+                         shank=float(ms[m].mean() - floor_s)))
+    return dict(rows=rows, floor_foot=floor_f, floor_shank=floor_s,
+                need_move=cfg.func_move_dps, need_still=cfg.func_still_dps,
+                peak_foot=float(mf.max() - floor_f),
+                peak_shank=float(ms.max() - floor_s),
+                duration=float(t[-1]))
 
 
 def _axis_from(g: np.ndarray) -> Tuple[np.ndarray, float]:

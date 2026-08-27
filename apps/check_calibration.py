@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO))
 import numpy as np
 
 from hitlo.ankle_angle import (functional_calibration, find_movement_segments,
-                               validate_functional_calibration,
+                               validate_functional_calibration, movement_report,
                                ankle_angle_functional, FUNCTIONAL_CALIBRATION)
 
 MARK = {"ok": "  ok  ", " warn": " warn ", "fail": " FAIL "}
@@ -75,6 +75,45 @@ def report(cal, label):
     return v["ok"]
 
 
+
+def timeline(foot, shank):
+    """Show what each segment actually did, so a refusal is actionable.
+
+    Both columns are movement ABOVE that sensor's own resting level, because
+    the resting level differs per sensor -- a Trigno shank idles around 16
+    deg/s where the foot beside it idles around 10.
+    """
+    rep = movement_report(foot, shank)
+    need_m, need_s = rep["need_move"], rep["need_still"]
+    print(f"\n    {DIM}what each segment did, in deg/s above its own resting "
+          f"level{OFF}")
+    print(f"    {DIM}(resting: foot {rep['floor_foot']:.0f}, shank "
+          f"{rep['floor_shank']:.0f} deg/s · moving needs >{need_m:.0f} · "
+          f"still needs <{need_s:.0f}){OFF}")
+    print(f"      {'time':>6}  {'foot':>6} {'shank':>6}   part")
+    for r in rep["rows"]:
+        f_, s_ = r["foot"], r["shank"]
+        part = ""
+        if f_ > need_m and s_ < need_s:
+            part = f"{GRN}A{OFF}"
+        elif s_ > need_m and f_ < need_s:
+            part = f"{GRN}B{OFF}"
+        elif s_ > need_m and f_ > need_m:
+            part = f"{GRN}C?{OFF}"
+        bar = lambda v: "#" * int(min(max(v, 0), 160) / 8)
+        print(f"      {r['t']:5.0f}s  {f_:6.0f} {s_:6.0f}   {part:<3} "
+              f"{DIM}{bar(f_):<20}{OFF}{bar(s_)}")
+    print(f"\n    {DIM}peak: foot {rep['peak_foot']:.0f}, shank "
+          f"{rep['peak_shank']:.0f} deg/s above resting{OFF}")
+    if rep["peak_shank"] < need_m:
+        print(f"    {YEL}The shank never moved enough for part B.{OFF} Rock the "
+              f"knee further and faster -- it needs to clearly exceed "
+              f"{need_m:.0f} deg/s above resting.")
+    if rep["peak_foot"] < need_m:
+        print(f"    {YEL}The foot never moved enough for part A.{OFF} Point and "
+              f"flex through a fuller range.")
+
+
 def check_file(path):
     from hitlo.io import load_trigno_segment, trigno_inventory
     print(f"\n{BOLD}{os.path.basename(path)}{OFF}")
@@ -105,6 +144,7 @@ def check_file(path):
             print(f"    {RED}Not a usable calibration.{OFF} "
                   f"{str(e).splitlines()[0]}")
             print(f"    Parts detected: {found if found else 'none'}")
+            timeline(foot, shank)
             worst = 1
             continue
         if not report(cal, f"{side} leg"):
