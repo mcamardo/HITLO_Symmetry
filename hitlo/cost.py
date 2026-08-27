@@ -38,7 +38,7 @@ from hitlo.detection import DetectionConfig, detect_heelstrikes_full
 from hitlo.detectors import detect as detect_strikes, detector_name
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index,
-    trim_peaks, filter_implausible_strides,
+    trim_peaks, filter_implausible_strides, walking_window,
 )
 from hitlo.io import (load_both_polar_streams, load_polar_stream,
                       load_streams, trial_filename)
@@ -245,9 +245,26 @@ class SymmetryCost:
                 f"barely walked, or a sensor lost skin contact mid-trial.",
                 verbose)
 
-        # --- Trim + plausibility filter ---
+        # --- Restrict to walking, then trim + plausibility filter ---
+        # The symmetry index has to come from walking. A trial is not walking
+        # end to end: the subject stands while the device is set, walks, then
+        # stops while LabRecorder is still running. Trimming a fixed few
+        # seconds off each end does not remove a stand in the middle, so find
+        # the walking segment first and trim within it.
         trial_start = min(left.timestamps[0], right.timestamps[0])
         trial_end = max(left.timestamps[-1], right.timestamps[-1])
+        win = walking_window(left, right)
+        if win is not None:
+            trial_start, trial_end = win
+            if verbose:
+                t0 = min(left.timestamps[0], right.timestamps[0])
+                print(f"   Walking segment: {trial_start - t0:.0f}-"
+                      f"{trial_end - t0:.0f}s of "
+                      f"{max(left.timestamps[-1], right.timestamps[-1]) - t0:.0f}s")
+        elif verbose:
+            print("   Walking segment: not resolvable (no gyro, or never "
+                  "sustained) — using the whole recording")
+
         left_times = trim_peaks(left_times_raw, trial_start, trial_end, self.trim_seconds)
         right_times = trim_peaks(right_times_raw, trial_start, trial_end, self.trim_seconds)
 

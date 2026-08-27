@@ -375,6 +375,53 @@ def test_gp_kernel_constraint_survives_a_fit():
     return f"lengthscale {ls:.3f} still inside [0.05, 1.0] after a real fit"
 
 
+def test_si_comes_from_walking_only():
+    """A trial is not walking end to end, and the cost function must know it.
+
+    Before this, the only windowing was trim_peaks -- a fixed few seconds off
+    each end. That cannot remove a stand in the MIDDLE of a recording, and on
+    real trials the walking segment is 31-87% of the file: sub-P012 run-012 is
+    174 s long with 55 s of walking in it.
+
+    Also pins the sensor choice. The window must come from the SHANK streams
+    only. Feet swing far harder, so averaging them in raises the activity
+    magnitude and the same fixed threshold opens a wider window -- measured on
+    a four-sensor recording, that swallowed the ramp-up and moved SI by 2
+    points.
+    """
+    from hitlo.symmetry import walking_window
+    from hitlo.io import SensorStream
+    fs, n = 148.0, int(120 * 148)
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(7)
+
+    def limb(phase):
+        # still for 0-30 s, walking 30-100 s, still after
+        w = 240.0 * np.sin(2 * np.pi * (t / 1.4 - phase))
+        moving = (t >= 30) & (t <= 100)
+        w = np.where(moving, w, rng.normal(0, 3.0, n))
+        g = np.zeros((n, 3)); g[:, 2] = w
+        a = np.zeros((n, 3)); a[:, 1] = 1.0
+        return SensorStream(name="s", timestamps=t + 1000.0, accel=a, gyro=g,
+                            actual_fs=fs)
+
+    L, R = limb(0.0), limb(0.5)
+    win = walking_window(L, R)
+    assert win is not None, "walking segment not found in an obvious case"
+    lo, hi = win[0] - 1000.0, win[1] - 1000.0
+    assert 28 < lo < 33, f"window starts at {lo:.1f}s, expected ~30"
+    assert 97 < hi < 103, f"window ends at {hi:.1f}s, expected ~100"
+
+    # No gyro -> must fall back rather than lose the trial (the Polar path).
+    class _NoGyro(SensorStream):
+        pass
+    pl = SensorStream(name="p", timestamps=t + 1000.0,
+                      accel=np.zeros((n, 3)), gyro=None, actual_fs=fs)
+    assert walking_window(pl, pl) is None, (
+        "a stream without gyro must return None, not raise or guess")
+    return f"found {lo:.0f}-{hi:.0f}s of a 120 s trial; falls back without gyro"
+
+
 def test_session_calibration_reuse_is_exact_and_guarded():
     """Capturing a calibration once and reusing it must reproduce the direct
     path exactly, and must refuse a sensor it did not come from.

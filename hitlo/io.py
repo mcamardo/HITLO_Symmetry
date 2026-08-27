@@ -286,6 +286,47 @@ def load_trigno_segment(xdf_path: str,
     return None
 
 
+def duplicate_sensor_blocks(samples, labels) -> List[Tuple[str, str]]:
+    """Pairs of segments whose channels carry identical data.
+
+    Two labelled sensors publishing the same numbers means the bridge mapped
+    two slots to one physical sensor, so one of them is not the body part it
+    claims. Nothing downstream can detect this from the values alone: the
+    duplicated block is a perfectly good signal, just from the wrong segment.
+    It reached a recorded session -- a left_shank block that was a byte-for-byte
+    copy of left_foot, which made the detector find foot contacts on one leg
+    and shank contacts on the other and produced a symmetry index of +107%.
+
+    The usual cause is Trigno channel allocation: the base address is
+    (STARTINDEX - 1) * 9, STARTINDEX counts PAIRED sensors rather than slot
+    numbers, and adding or re-moding a sensor reshuffles it. See
+    docs/trigno_setup.md.
+
+    Returns [] when every segment is distinct.
+    """
+    X = np.asarray(samples)
+    if X.ndim != 2 or X.shape[0] < 2:
+        return []
+    by_seg: Dict[str, List[int]] = {}
+    for i, lab in enumerate(labels):
+        low = str(lab).strip().lower()
+        for side in _DEFAULT_SIDES:
+            if low.startswith(side):
+                by_seg.setdefault(f"{side}_{_label_segment(low)}", []).append(i)
+                break
+    segs = sorted(by_seg)
+    dups: List[Tuple[str, str]] = []
+    for a_i in range(len(segs)):
+        for b_i in range(a_i + 1, len(segs)):
+            a, b = segs[a_i], segs[b_i]
+            ca, cb = by_seg[a], by_seg[b]
+            if len(ca) != len(cb) or not ca:
+                continue
+            if np.array_equal(X[:, ca], X[:, cb]):
+                dups.append((a, b))
+    return dups
+
+
 def trigno_inventory(xdf_path: str,
                      stream_name: str = "TrignoIMU") -> Dict[str, List[str]]:
     """What sensors a Trigno recording actually contains.

@@ -45,6 +45,45 @@ import numpy as np
 # Steady-state trim
 # ===========================================================================
 
+def walking_window(left, right, thresh_dps: float = 90.0,
+                  min_s: float = 10.0):
+    """Longest continuous stretch of walking, as (t_start, t_end) LSL seconds.
+
+    The symmetry index must come from walking. A trial is not walking end to
+    end: a subject stands while the operator sets the device, walks, and stops
+    while LabRecorder is still running. Trimming a fixed few seconds off each
+    end does not remove a 30 s stand in the middle of a recording, and every
+    non-walking second contributes either nothing or a spurious event.
+
+    Uses the SHANK streams only, never the feet. Feet swing far harder than
+    shanks, so averaging them in raises the activity magnitude and the same
+    fixed threshold then opens a wider window -- on a four-sensor recording
+    that swallowed the ramp-up and moved SI by 2 points.
+
+    Falls back to the whole recording (returns None) when there is no gyro, or
+    nothing clears the threshold for min_s, so the caller keeps its previous
+    behaviour rather than losing the trial.
+    """
+    if not (getattr(left, 'has_gyro', False) and getattr(right, 'has_gyro', False)):
+        return None
+    t = np.asarray(left.timestamps, dtype=np.float64)
+    if len(t) < 2:
+        return None
+    fs = 1.0 / float(np.median(np.diff(t)))
+    act = (np.linalg.norm(np.asarray(left.gyro, dtype=np.float64), axis=1) +
+           np.linalg.norm(np.asarray(right.gyro, dtype=np.float64), axis=1)) / 2.0
+    k = max(int(fs), 1)
+    act = np.convolve(act, np.ones(k) / k, mode='same')
+    idx = np.flatnonzero(act > thresh_dps)
+    if len(idx) < min_s * fs:
+        return None
+    runs = np.split(idx, np.flatnonzero(np.diff(idx) > k) + 1)
+    best = max(runs, key=len)
+    if len(best) < min_s * fs:
+        return None
+    return float(t[best[0]]), float(t[best[-1]])
+
+
 def trim_peaks(peak_times: np.ndarray,
                trial_start: float,
                trial_end: float,
@@ -218,6 +257,7 @@ def filter_implausible_strides(heel_strike_times: np.ndarray,
 
 
 __all__ = [
+    "walking_window",
     "trim_peaks",
     "compute_step_times",
     "compute_symmetry_index",
