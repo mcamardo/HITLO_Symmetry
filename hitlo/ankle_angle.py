@@ -298,8 +298,17 @@ def session_calibration(foot: SensorStream,
         g = np.asarray(stream.gyro, dtype=np.float64)
         a = np.asarray(stream.accel, dtype=np.float64)
         ax = sagittal_axis(g)
+        p_, q_ = _INPLANE[ax]
+        # The tilt reference must be stored too, not just bias and gravity.
+        # sagittal_pitch measures tilt RELATIVE to the calibration pose (see
+        # the atan2 wrap note there), so a reuse path that recomputed a raw
+        # atan2 would silently disagree with the direct path -- it did, by 17
+        # degrees, until the regression test caught it.
+        raw = np.arctan2(a[ref, p_], a[ref, q_])
         return dict(axis=int(ax), bias=float(g[ref, ax].mean()),
                     g0=float(np.median(np.linalg.norm(a[ref], axis=1))),
+                    ref_ang=float(np.arctan2(np.sin(raw).mean(),
+                                             np.cos(raw).mean())),
                     name=str(stream.name))
 
     return dict(foot=_cap(foot), shank=_cap(shank),
@@ -416,7 +425,8 @@ def _pitch_with(stream: SensorStream, fs: float, cap: Dict[str, object],
     ax = int(cap["axis"])
     p, q = _INPLANE[ax]
     w = g[:, ax] - float(cap["bias"])
-    tilt = np.degrees(np.arctan2(a[:, p], a[:, q]))
+    raw = np.arctan2(a[:, p], a[:, q])
+    tilt = np.degrees(np.angle(np.exp(1j * (raw - float(cap["ref_ang"])))))
     amag = np.linalg.norm(a, axis=1)
     gate = np.clip(1.0 - np.abs(amag - float(cap["g0"])) / cfg.gate_width_g, 0.0, 1.0)
     dt = 1.0 / float(fs)
