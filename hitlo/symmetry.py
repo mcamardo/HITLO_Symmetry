@@ -37,7 +37,7 @@ already lean (see compute_baseline_target in apps/hitlo_console.py). For
 Aim 2 the target is 0.
 """
 
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import numpy as np
 
 
@@ -210,6 +210,63 @@ def compute_symmetry_index(right_step_times: np.ndarray,
 # ===========================================================================
 # Physiologic-plausibility stride filter
 # ===========================================================================
+
+def leg_consistency(left_times: np.ndarray,
+                    right_times: np.ndarray,
+                    per_stride_si: Optional[np.ndarray] = None,
+                    ) -> List[str]:
+    """Cross-leg checks that per-leg plausibility cannot catch.
+
+    filter_implausible_strides asks whether each leg's strides are possible on
+    their own. That misses the failure that actually matters: a detector
+    counting one stride as two on ONE leg. Halved stride times are perfectly
+    legal in isolation -- P017 run-003 produced a right stride of 0.711 s
+    against a left of 1.422 s, exactly 2:1, and passed every per-leg check
+    with no warning at all. It reached the optimizer as a symmetry index of
+    +67.89%, which is not a gait measurement, it is a counting error.
+
+    The two legs of one person walking share a cadence. When they do not, the
+    detector is wrong, not the participant.
+
+    Returns a list of human-readable warnings; empty means nothing detected.
+    """
+    out: List[str] = []
+    lt = np.asarray(left_times, dtype=np.float64)
+    rt = np.asarray(right_times, dtype=np.float64)
+    if len(lt) < 3 or len(rt) < 3:
+        return out
+
+    sl = float(np.median(np.diff(lt)))
+    sr = float(np.median(np.diff(rt)))
+    if sl > 0 and sr > 0:
+        ratio = sr / sl
+        if not (0.75 <= ratio <= 1.333):
+            near = ("one leg's strides are close to HALF the other's, which is "
+                    "a detector counting each stride twice"
+                    if 0.4 <= ratio <= 0.6 or 1.67 <= ratio <= 2.5 else
+                    "the two legs disagree on cadence")
+            out.append(
+                f"Stride times do not match between legs: left {sl:.3f}s vs "
+                f"right {sr:.3f}s (ratio {ratio:.2f}). Two legs of one walker "
+                f"share a cadence -- {near}. Do not trust this trial's "
+                f"symmetry index.")
+
+    n_ratio = len(rt) / max(len(lt), 1)
+    if not (0.7 <= n_ratio <= 1.43):
+        out.append(
+            f"Event counts differ sharply between legs: left {len(lt)}, right "
+            f"{len(rt)} (ratio {n_ratio:.2f}). One detector is finding events "
+            f"the other is not.")
+
+    if per_stride_si is not None and len(per_stride_si) >= 4:
+        sd = float(np.std(per_stride_si))
+        if sd > 25.0:
+            out.append(
+                f"Symmetry index varies by {sd:.0f} points from stride to "
+                f"stride. The trial mean is not describing a steady gait -- "
+                f"check the detection before using it.")
+    return out
+
 
 def filter_implausible_strides(heel_strike_times: np.ndarray,
                                min_stride_s: float = 0.3,

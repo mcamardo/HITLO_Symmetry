@@ -38,7 +38,7 @@ from hitlo.detection import DetectionConfig, detect_heelstrikes_full
 from hitlo.detectors import detect as detect_strikes, detector_name
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index,
-    trim_peaks, filter_implausible_strides, walking_window,
+    trim_peaks, filter_implausible_strides, walking_window, leg_consistency,
 )
 from hitlo.io import (load_both_polar_streams, load_polar_stream,
                       load_streams, trial_filename)
@@ -305,6 +305,12 @@ class SymmetryCost:
 
         si, per_stride = compute_symmetry_index(right_steps, left_steps,
                                                 signed=self.signed)
+
+        # Cross-leg checks. Per-leg plausibility cannot see a detector that
+        # counts one stride as two -- the halved stride times are individually
+        # legal, and such a trial reached the optimizer with no warning at all.
+        # See leg_consistency().
+        warnings.extend(leg_consistency(left_times, right_times, per_stride))
 
         # The cost IS the symmetry index. No shape penalty: every configuration
         # BO can reach already satisfies the shape constraints by construction,

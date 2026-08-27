@@ -872,6 +872,47 @@ def test_functional_calibration_recovers_a_known_ankle_angle():
             f"walking correctly refused as a calibration")
 
 
+
+def test_double_detection_on_one_leg_is_caught():
+    """A detector counting one stride as two must not reach the optimizer.
+
+    This is the failure that per-leg plausibility cannot see. Halved stride
+    times are individually legal -- 0.71 s is a possible stride -- so every
+    per-leg check passes and the trial arrives as a symmetry index built from
+    a counting error. P017 run-003 did exactly this: left 1.42 s, right 0.71 s,
+    SI +67.89%, zero warnings.
+    """
+    from hitlo.symmetry import leg_consistency
+
+    # a clean walker: both legs on the same cadence
+    left = np.arange(0.0, 40.0, 1.40)
+    right = left + 0.70
+    assert leg_consistency(left, right) == [], (
+        "flagged a normal trial where both legs share a cadence")
+
+    # the right detector fires twice per stride: an extra event at each
+    # stride's midpoint, which halves every interval rather than alternating
+    right_doubled = np.sort(np.concatenate([right, right + 0.70]))
+    warns = leg_consistency(left, right_doubled)
+    assert warns, "missed a leg detecting every stride twice"
+    assert any("HALF" in w or "half" in w for w in warns), (
+        f"caught it but did not say what it was: {warns}")
+    assert any("counts" in w or "counting" in w for w in warns)
+
+    # one leg dropping half its events is the same error mirrored
+    assert leg_consistency(left[::2], right), "missed a leg missing events"
+
+    # a wildly unsteady symmetry index is its own warning
+    steady = np.full(20, 3.0)
+    assert not any("varies by" in w
+                   for w in leg_consistency(left, right, steady))
+    jumpy = np.array([-60.0, 55.0, -48.0, 61.0] * 5)
+    assert any("varies by" in w for w in leg_consistency(left, right, jumpy)), (
+        "did not flag a symmetry index swinging 60 points between strides")
+
+    return ("clean trial passes; doubled, halved and unsteady trials each warn")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0
