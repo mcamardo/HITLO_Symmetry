@@ -212,6 +212,35 @@ def check_last_recording(cfg):
                          trim_seconds=float(cfg['Cost'].get('trim_seconds', 3.0)),
                          config=cfg)
         a = c.analyze_trial(trial_num=1, filename=latest.name, verbose=False)
+    # Two sensors publishing identical data means the bridge mapped two slots
+    # to one physical sensor, so one is not the body part it claims. Nothing
+    # downstream can see this from the values: the duplicated block is a good
+    # signal from the wrong segment. It reached a recorded session once, and
+    # produced a symmetry index of +107%.
+    try:
+        import pyxdf as _px
+        from hitlo.io import duplicate_sensor_blocks
+        want = (cfg.get('Sensing') or {}).get('stream', 'TrignoIMU')
+        for _s in _px.load_xdf(str(latest))[0]:
+            if _s['info']['name'][0] != want:
+                continue
+            _labs = [ch['label'][0] for ch in
+                     _s['info']['desc'][0]['channels'][0]['channel']]
+            _d = duplicate_sensor_blocks(np.asarray(_s['time_series'], float), _labs)
+            if _d:
+                for a_, b_ in _d:
+                    report(BAD, "duplicate sensor",
+                           f"{a_} and {b_} carry IDENTICAL data — the bridge "
+                           f"mapped two slots to one sensor. Check sensor modes "
+                           f"and SENSOR_MAP; see docs/trigno_setup.md")
+            else:
+                report(OK, "distinct sensors",
+                       f"{len({l.rsplit('_',2)[0] for l in _labs})} segments, "
+                       f"no duplicated channel blocks")
+            break
+    except Exception:
+        pass
+
     if a is None:
         report(BAD, latest.name[-28:], f"analysis failed: {c.last_failure}")
     else:
