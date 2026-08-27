@@ -785,6 +785,93 @@ def test_real_recording_end_to_end():
             f"SI={a.symmetry_index:+.2f}%")
 
 
+def test_functional_calibration_recovers_a_known_ankle_angle():
+    """The measured-axis path must survive an arbitrary sensor mounting.
+
+    The failure this guards against is not subtle noise, it is the 140-degree
+    range of motion that came out of differencing two separately-derived axes.
+    A wrong relative sign adds the two segments' swings instead of cancelling
+    them, so the check that matters is that a KNOWN excursion comes back at
+    the right size with the sensors strapped on at silly angles.
+    """
+    from scipy.spatial.transform import Rotation as Rot
+    from hitlo.io import SensorStream
+    from hitlo.ankle_angle import (functional_calibration,
+                                   validate_functional_calibration,
+                                   ankle_angle_functional,
+                                   find_movement_segments)
+
+    fs, axis = 148.0, np.array([0.0, 1.0, 0.0])
+    worst = 0.0
+    for k, (m_sh, m_ft, ankle_deg) in enumerate([
+            ((0, 0, 0), (0, 0, 0), 18.0),
+            ((90, 0, 0), (-90, 45, 0), 10.0),
+            ((30, 60, -45), (15, -70, 120), 30.0)]):
+        r = np.random.default_rng(100 + k)
+        R1 = Rot.from_euler('xyz', m_sh, degrees=True)
+        R2 = Rot.from_euler('xyz', m_ft, degrees=True)
+        blk = lambda T: np.arange(0, T, 1 / fs)
+        W1, W2 = [], []
+        u = blk(10); a = (25 * 2 * np.pi * .5) * (np.sin(2 * np.pi * .5 * u) - 1)
+        W1.append(np.zeros((len(u), 3))); W2.append(a[:, None] * axis)   # A
+        u = blk(2); W1.append(np.zeros((len(u), 3))); W2.append(np.zeros((len(u), 3)))
+        u = blk(10); b = (20 * 2 * np.pi * .5) * (np.sin(2 * np.pi * .5 * u) + 1)
+        W1.append(b[:, None] * axis); W2.append(np.zeros((len(u), 3)))   # B
+        u = blk(2); W1.append(np.zeros((len(u), 3))); W2.append(np.zeros((len(u), 3)))
+        u = blk(10); c = (35 * 2 * np.pi * .6) * np.sin(2 * np.pi * .6 * u)
+        W1.append(c[:, None] * axis); W2.append(c[:, None] * axis)       # C
+        u = blk(2); W1.append(np.zeros((len(u), 3))); W2.append(np.zeros((len(u), 3)))
+        n_cal = sum(len(x) for x in W1)
+        u = blk(30)
+        sw = np.column_stack([0 * u, 150 * np.sin(2 * np.pi * .9 * u), 0 * u])
+        ank = (ankle_deg * 2 * np.pi * .9) * np.sin(2 * np.pi * .9 * u)
+        W1.append(sw); W2.append(sw - ank[:, None] * axis)
+        w1, w2 = np.vstack(W1), np.vstack(W2)
+        N = len(w1); t = np.arange(N) / fs + 1000.0
+        g1 = R1.inv().apply(w1) + np.array([1.2, -.7, 2.1]) + r.normal(0, 1, (N, 3))
+        g2 = R2.inv().apply(w2) + np.array([-3.4, .9, -1.1]) + r.normal(0, 1, (N, 3))
+        acc = np.tile([0, 0, -1.0], (N, 1)) + r.normal(0, .02, (N, 3))
+        mk = lambda g, nm: SensorStream(accel=acc, timestamps=t, actual_fs=fs,
+                                        name=nm, gyro=g, side='left',
+                                        backend='trigno')
+        foot, shank = mk(g2, 'left_foot'), mk(g1, 'left_shank')
+        hs = np.arange(0, 30, 1 / .9) + n_cal / fs
+
+        cal = functional_calibration(foot, shank)
+        v = validate_functional_calibration(cal)
+        assert v['ok'], f"mounting {m_sh}/{m_ft}: calibration rejected itself"
+        res = ankle_angle_functional(foot, shank, cal, heel_strike_times=hs)
+        tru = np.cumsum(ank) / fs
+        true_rom = float(np.ptp(tru - tru.mean()))
+        err = abs(res['rom'] - true_rom)
+        worst = max(worst, err)
+        assert err < 1.0, (
+            f"mounting {m_sh}/{m_ft}: recovered {res['rom']:.1f} deg against a "
+            f"true {true_rom:.1f}. A sign error here reads as 4-6x too large.")
+        assert abs(cal['rigid_gain'] - 1.0) < 0.15
+        assert cal['rigid_corr'] > 0.95
+
+    # and it must refuse when the movements are simply not in the recording
+    walk_f = SensorStream(accel=foot.accel[n_cal:], timestamps=foot.timestamps[n_cal:],
+                          actual_fs=fs, name='left_foot', gyro=foot.gyro[n_cal:],
+                          side='left', backend='trigno')
+    walk_s = SensorStream(accel=shank.accel[n_cal:], timestamps=shank.timestamps[n_cal:],
+                          actual_fs=fs, name='left_shank', gyro=shank.gyro[n_cal:],
+                          side='left', backend='trigno')
+    try:
+        functional_calibration(walk_f, walk_s)
+        raise AssertionError("accepted a plain walking file as a calibration")
+    except ValueError:
+        pass
+    seg = find_movement_segments(walk_f, walk_s)
+    assert seg['rigid'] is None, (
+        "walking was classified as a rigid swing -- both segments move during "
+        "walking, so the magnitude-agreement test is what separates them")
+
+    return (f"3 mountings, worst range-of-motion error {worst:.2f} deg; "
+            f"walking correctly refused as a calibration")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

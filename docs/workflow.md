@@ -61,12 +61,62 @@ existing recordings still load).
    ```
 4. Watch the live plots for a few strides before starting.
 
-### Calibration pose (only if you are recording ankle angle)
+### Ankle calibration (only if you are recording ankle angle)
 
-Ankle angle needs a neutral reference. Step time and the symmetry index do
-not — skip this if you are not using a foot sensor.
+Step time and the symmetry index need none of this — skip the whole section if
+you are not using a foot sensor.
 
-At the start of the **first** trial after mounting, have the participant hold:
+There are **two** calibrations, and they do different jobs. The axis
+calibration sets how large the angle is; the neutral pose sets where its zero
+sits. Without the first, the shape of the curve is still readable but the
+numbers are not: measured on P017, skipping it put range of motion near 140°
+against a literature 25–30°.
+
+#### 1. Axis calibration — three movements, once per session
+
+Record these **as their own file**, before the walking trials, with the sensors
+already mounted where they will stay. Do not fold them into a walking trial: a
+stretch of walking can be mistaken for the third movement.
+
+> **A.** Sit with the foot off the ground and the lower leg still. Starting
+> with the foot relaxed, pull the toes up toward the shin and lower them again,
+> about ten times. Only the foot moves.
+>
+> **B.** Stand with the foot flat and press the heel into the floor. Keeping
+> the heel down, rock the knee forward over the toes and back, about ten times.
+> Only the shank moves.
+>
+> **C.** Sit with the foot off the ground and hold the ankle stiff, as if it
+> were in a walking boot. Swing the whole lower leg from the knee about ten
+> times, so the foot and shank move together as one piece.
+
+Each movement does one job. **A** measures the ankle axis as the foot's sensor
+sees it, **B** measures the same axis as the shank's sensor sees it, and **C**
+settles the sign between them — which is the part that actually broke: with the
+relative sign wrong, the two segments' swings add instead of cancelling, and
+that is where 140° came from.
+
+The order does not matter and the parts do not need marking; they are
+identified automatically by which segment is moving. `trial_explorer` reports
+whether each movement isolated one axis, whether A and B found the same axis,
+and whether the ankle really stayed locked during C, and refuses the
+calibration rather than producing a plausible wrong magnitude.
+
+Recovered a known ankle excursion to within 0.03° in simulation across four
+sensor mountings and three ranges of motion. It is mounting-independent by
+construction — strap the sensors on at any angle — but it does **not** survive
+re-strapping, since the measured axis encodes where each sensor sits.
+
+> The published alternative, a hinge fit over the whole recording (Seel,
+> Raisch & Schauer 2014, *Sensors* 14(4) 6891–6909), is deliberately not used
+> here. It assumes the ankle is a hinge; with 31–52% of the measured rotation
+> off-axis in this data, its recovered axis lands ~39° from truth and range of
+> motion swings from 27° on one leg to 121° on another.
+
+#### 2. Neutral pose — sets the zero
+
+Ankle angle also needs a neutral reference to be zeroed against. At the start
+of the **first** trial after mounting, have the participant hold:
 
 > **Stand tall and still, weight even on both feet, feet flat and pointing
 > forward, knees straight but not locked, arms at your sides. Look ahead, not

@@ -36,7 +36,10 @@ from hitlo.io import (load_streams, load_trigno_segment, sensing_config,
                       trigno_inventory)
 from hitlo.ankle_angle import (ankle_angle, stride_profile, verify_foot_side,
                                find_calibration_window, session_calibration,
-                               validate_calibration_pose, CALIBRATION_POSE)
+                               validate_calibration_pose, CALIBRATION_POSE,
+                               functional_calibration, ankle_angle_functional,
+                               validate_functional_calibration,
+                               find_movement_segments, FUNCTIONAL_CALIBRATION)
 from hitlo.detectors import detect, detector_name
 from hitlo.symmetry import compute_step_times, compute_symmetry_index
 
@@ -401,7 +404,74 @@ else:
 
         shank = sh_same if pair_side == fside else sh_other
 
-        with st.expander("⚖️ Calibration", expanded=True):
+        # ---- functional axis calibration ------------------------------
+        # Deriving each segment's axis from walking and differencing the two
+        # pitches does not give a joint angle: the axes are not the same
+        # physical axis. That path is kept below, but only its shape is
+        # meaningful. Measuring the axis fixes the magnitude.
+        fcal, fcal_v, fcal_err = None, None, None
+        with st.expander("🎯 Ankle axis calibration", expanded=True):
+            st.caption(
+                "The ankle axis has to be **measured**, from movements that "
+                "isolate it. Without this the shape of the curve is still "
+                "informative but the magnitude is not — it came out near 140° "
+                "against a literature 25–30° on P017.")
+            cal_file = st.selectbox(
+                "Calibration recording", trials, format_func=_label,
+                index=trials.index(choice), key="fcalfile",
+                help="A recording of the three calibration movements. If they "
+                     "were performed at the start of this trial, leave this "
+                     "set to the current file.")
+            try:
+                cf = load_trigno_segment(cal_file, fside, "foot")
+                cs = load_trigno_segment(cal_file, pair_side, "shank")
+                if cf is None or cs is None:
+                    raise ValueError(
+                        "that recording does not carry both a foot and a "
+                        "shank sensor for this leg")
+                fcal = functional_calibration(cf, cs)
+                fcal_v = validate_functional_calibration(fcal)
+            except Exception as e:
+                fcal, fcal_err = None, str(e)
+
+            if fcal_v is not None:
+                icon = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+                st.dataframe(
+                    [{"check": c["name"], "": icon[c["level"]],
+                      "measured": c["detail"], "why it matters": c["why"]}
+                     for c in fcal_v["checks"]],
+                    use_container_width=True, hide_index=True)
+                if not fcal_v["ok"]:
+                    st.error("**The axis was not identified.** Re-record the "
+                             "three movements; the angle below falls back to "
+                             "the uncalibrated path, whose magnitude is wrong.")
+                elif fcal_v["warn"]:
+                    st.warning("Axis identified, but check the warnings before "
+                               "trusting the sign or small differences.")
+                else:
+                    st.success(
+                        "Axis measured. Range of motion below is calibrated.")
+                st.caption(
+                    "Validated against simulation with a known ankle "
+                    "excursion: recovered to within 0.03° across four sensor "
+                    "mountings and three ranges of motion, with gyro bias "
+                    "recovered to 0.03°/s. Capture once per mounting — the "
+                    "axis encodes where each sensor sits on the limb, so "
+                    "re-strapping anything invalidates it."
+                    "\n\nThe published hinge-fit method (Seel et al. 2014) "
+                    "is *not* used: it assumes the ankle is a hinge, and with "
+                    "the 31–52% off-axis motion in this data its axis error "
+                    "reaches ~39°.")
+            else:
+                st.info("**No axis calibration in that recording.**\n\n"
+                        + FUNCTIONAL_CALIBRATION)
+                if fcal_err:
+                    st.caption(f"({fcal_err.splitlines()[0]})")
+
+        use_func = bool(fcal is not None and fcal_v is not None and fcal_v["ok"])
+
+        with st.expander("⚖️ Neutral-pose calibration (sets the zero)",
+                         expanded=not use_func):
             st.markdown(f"**The pose:** {CALIBRATION_POSE}")
             auto = find_calibration_window(shank)
             if auto is None:
@@ -447,14 +517,39 @@ else:
             st.warning(f"Could not compute ankle angle: {e}")
             res = None
 
-        if res is not None:
-            ta, ang = res["t"], res["angle"]
-            if res["zero"] != "standing":
-                st.warning(res["note"])
-
+        if res is not None or use_func:
             m = "gyro" if "gyro" in EV else list(EV)[0]
             hs = EV[m]["R" if pair_side == "right" else "L"]
-            prof = stride_profile(ang, ta, hs)
+            ylab = "ankle angle (deg), dorsiflexion +"
+            prof, ta, ang = None, None, None
+
+            if res is not None:
+                ta, ang = res["t"], res["angle"]
+                prof = stride_profile(ang, ta, hs)
+                # The uncalibrated path's zero only matters when it is the
+                # path actually being shown.
+                if res["zero"] != "standing" and not use_func:
+                    st.warning(res["note"])
+
+            if use_func:
+                fres = ankle_angle_functional(foot, shank, fcal,
+                                              heel_strike_times=hs)
+                # No continuous angle on purpose: integrating one across a
+                # whole trial accumulates bias drift with nothing to pin it
+                # down. The rate is drift-free, and the angle is only ever
+                # integrated within a stride.
+                ta, ang = fres["t"], fres["rate"]
+                ylab = "ankle angular velocity (deg/s), dorsiflexion +"
+                if fres.get("profile") is not None:
+                    prof = {"mean": fres["profile"], "sd": fres["profile_sd"],
+                            "n": fres["n_strides"]}
+            elif res is not None:
+                st.warning(
+                    "**Uncalibrated — read the shape, not the numbers.** "
+                    "Without an axis calibration this is the difference of two "
+                    "separately-derived axes, which is not a joint angle. "
+                    "Range of motion from this path came out near 140° on "
+                    "P017 against a literature 25–30°.")
 
             g1, g2 = st.columns([1.1, 1])
             with g1:
@@ -467,8 +562,7 @@ else:
                 f4.add_hline(y=0, line=dict(color=INK, width=1.2, dash="dot"))
                 f4.update_layout(height=340, margin=dict(l=50, r=20, t=20, b=40),
                                  plot_bgcolor="white", xaxis_title="time (s)",
-                                 yaxis_title="ankle angle (deg), dorsiflexion +",
-                                 showlegend=False)
+                                 yaxis_title=ylab, showlegend=False)
                 f4.update_xaxes(gridcolor=GRID); f4.update_yaxes(gridcolor=GRID)
                 st.plotly_chart(f4, use_container_width=True)
                 st.caption("Dotted lines are heel strikes from the detector above.")
