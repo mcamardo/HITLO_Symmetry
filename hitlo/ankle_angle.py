@@ -143,7 +143,25 @@ def sagittal_pitch(accel: np.ndarray,
     p, q = _INPLANE[ax]
 
     w = g[:, ax] - g[ref, ax].mean()                 # bias removed
-    tilt = np.degrees(np.arctan2(a[:, p], a[:, q]))  # gravity tilt in-plane
+
+    # Gravity tilt in the sagittal plane, expressed RELATIVE TO THE
+    # CALIBRATION POSE and wrapped to (-180, 180].
+    #
+    # Taking the raw atan2 breaks whenever the mounting happens to put the
+    # tilt near the +/-180 discontinuity: the signal then jumps 360 degrees
+    # every time it crosses, the complementary filter chases each jump, and
+    # the angle never recovers. That is not hypothetical -- a session where
+    # the shank sensors were mounted inverted sat at -145 degrees and crossed
+    # the wrap 1087 times in 89 s of walking, producing a 134 degree range of
+    # motion. The same code on the same subject the day before, with the
+    # sensors the other way up, sat at -1.2 degrees and never wrapped.
+    #
+    # Referencing to the calibration pose puts the working range around zero
+    # for ANY mounting, so the discontinuity is half a turn away from where
+    # the signal lives. The zero it establishes is the one we want anyway.
+    raw = np.arctan2(a[:, p], a[:, q])
+    ref_ang = np.arctan2(np.sin(raw[ref]).mean(), np.cos(raw[ref]).mean())
+    tilt = np.degrees(np.angle(np.exp(1j * (raw - ref_ang))))
 
     amag = np.linalg.norm(a, axis=1)
     g0 = float(np.median(amag[ref]))                 # this sensor's 1 g
