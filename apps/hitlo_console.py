@@ -88,7 +88,12 @@ from hitlo.cost import SymmetryCost
 from hitlo.detection import detect_heelstrikes_full, DetectionConfig
 from hitlo.detectors import detect as detect_strikes
 from hitlo.io import (load_both_polar_streams, load_streams,
-                      trial_filename, backend_modality)
+                      trial_filename, backend_modality,
+                      load_trigno_segment, trigno_inventory)
+from hitlo.ankle_angle import (functional_calibration,
+                               validate_functional_calibration,
+                               find_movement_segments,
+                               FUNCTIONAL_CALIBRATION)
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index, trim_peaks,
 )
@@ -2883,6 +2888,9 @@ def _page_sensors_trigno():
     _live_bars_shared()
 
     st.markdown("---")
+    _ankle_calibration_panel()
+
+    st.markdown("---")
     st.subheader("4 · Preflight")
     if st.button("🚦 Run preflight"):
         import subprocess
@@ -3119,6 +3127,115 @@ def _page_sensors_polar():
             "READY" if r.returncode == 0 else "NOT READY")
         st.code(r.stdout or r.stderr, language=None)
 
+
+
+def _newest_recordings(limit: int = 12):
+    """Recent .xdf files under the configured data root, newest first."""
+    import glob as _glob
+    cfg = _active_config()
+    root = os.path.expanduser(str(
+        (cfg.get('Subject') or {}).get('base_dir') or '~/HITLO_Data'))
+    files = [f for f in _glob.glob(f"{root}/**/*.xdf", recursive=True)
+             if "_old" not in os.path.basename(f)]
+    return sorted(files, key=os.path.getmtime, reverse=True)[:limit]
+
+
+def _ankle_calibration_panel():
+    """Check an axis calibration while the participant is still wearing the
+    sensors.
+
+    This is here rather than in trial_explorer because the calibration cannot
+    be repaired after the fact: the axis encodes where each sensor sits, so a
+    failed calibration discovered during offline analysis means the whole
+    session has no usable ankle magnitude. Two minutes at the sensor bench
+    fixes it; a week later nothing does.
+    """
+    st.subheader("3b · Ankle axis calibration")
+    st.caption(
+        "Only needed if you are recording **ankle angle** — step time and the "
+        "symmetry index do not use it. Without this the shape of the ankle "
+        "curve is still readable but the magnitude is not: it came out near "
+        "140° against a literature 25–30°.")
+
+    with st.expander("The three movements", expanded=False):
+        st.markdown(FUNCTIONAL_CALIBRATION.replace("\n  ", "\n\n  "))
+        st.caption(
+            "Record them as **their own file**, before the walking trials, "
+            "with the sensors already where they will stay. Order does not "
+            "matter — the parts are identified by which segment is moving. "
+            "Do not fold them into a walking trial: walking can be mistaken "
+            "for the third movement.")
+
+    files = _newest_recordings()
+    if not files:
+        st.info("No recordings found yet. Record the three movements, then "
+                "check them here.")
+        return
+
+    pick = st.selectbox(
+        "Calibration recording", files, key="ankcal_file",
+        format_func=lambda f: (
+            f"{os.path.basename(f)}  ·  "
+            f"{time.strftime('%H:%M', time.localtime(os.path.getmtime(f)))}"),
+        help="Newest first. Pick the file you just recorded the movements in.")
+
+    if not st.button("🎯 Check this calibration", width="stretch"):
+        return
+
+    try:
+        inv = trigno_inventory(pick)
+    except Exception as e:
+        st.error(f"Could not read that recording: {e}")
+        return
+    sides = [sd for sd, segs in inv.items() if "foot" in segs and "shank" in segs]
+    if not sides:
+        st.warning(
+            "That recording has no leg carrying **both** a foot and a shank "
+            "sensor. The ankle axis is the angle between two segments, so one "
+            "sensor on its own cannot produce it.")
+        return
+
+    icon = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+    for side in sides:
+        st.markdown(f"**{side.capitalize()} leg**")
+        try:
+            cal = functional_calibration(
+                load_trigno_segment(pick, side, "foot"),
+                load_trigno_segment(pick, side, "shank"))
+        except ValueError as e:
+            seg = {}
+            try:
+                seg = find_movement_segments(
+                    load_trigno_segment(pick, side, "foot"),
+                    load_trigno_segment(pick, side, "shank"))
+            except Exception:
+                pass
+            found = [k for k in ("foot", "shank", "rigid") if seg.get(k)]
+            st.error(
+                f"**Not a usable calibration.** {str(e).splitlines()[0]}\n\n"
+                f"Parts detected: {found if found else 'none'}. Re-record the "
+                f"movements that are missing — this cannot be fixed later.")
+            continue
+        except Exception as e:
+            st.error(f"Could not read the sensors for this leg: {e}")
+            continue
+
+        v = validate_functional_calibration(cal)
+        st.dataframe(
+            [{"check": c["name"], "": icon[c["level"]],
+              "measured": c["detail"], "why it matters": c["why"]}
+             for c in v["checks"]],
+            width="stretch", hide_index=True)
+        if not v["ok"]:
+            st.error("**The axis was not identified.** Re-record now, while "
+                     "the sensors are still on — the calibration encodes where "
+                     "they sit, so it cannot be redone after they come off.")
+        elif v["warn"]:
+            st.warning("Usable, but read the warnings before trusting the "
+                       "sign or small between-trial differences.")
+        else:
+            st.success(f"Axis measured for the {side} leg. Ankle magnitude "
+                       f"will be calibrated for this session.")
 
 # ===========================================================================
 # NAVIGATION ENTRY POINT
