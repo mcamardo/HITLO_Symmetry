@@ -72,6 +72,13 @@ class GyroDetectionConfig:
     # not the dominant one.
     sagittal_axis: Optional[int] = None
 
+    # How much larger the winning axis must be before the measurement is
+    # trusted, and what to fall back on when it is not. 1.15 was chosen to
+    # reject the observed 127/114 = 1.11 tie while accepting a genuine
+    # foot mounting, where the sagittal axis leads by 2x or more.
+    axis_margin: float = 1.15
+    axis_fallback: int = 2            # z, the conventional shank mounting
+
     # Sign convention. Gyro polarity depends on mounting orientation, so by
     # default the direction of swing is inferred from the data instead of
     # assumed. Set explicitly (+1/-1) to pin it.
@@ -176,9 +183,28 @@ def sagittal_velocity(gyro: np.ndarray,
         raise ValueError(f"gyro must be (N, 3); got shape {g.shape}")
 
     sd = g.std(axis=0)
-    measured = int(np.argmax(sd))
+    order = np.argsort(sd)[::-1]
+    measured, runner_up = int(order[0]), int(order[1])
+    # Only trust the measurement when the winner is CLEARLY dominant. On a
+    # shank whose two largest axes are within a few percent, argmax flips
+    # between recordings of the same subject on noise -- observed on P017,
+    # where the same sensor mounted the same way gave sd y/z of 114/127 in one
+    # trial and 145/136 in the next. The detector then read a different
+    # physical rotation and double-fired, 63 events against 37.
+    decisive = sd[measured] >= cfg.axis_margin * sd[runner_up]
     if cfg.sagittal_axis is None:
-        axis = measured
+        if decisive:
+            axis = measured
+        else:
+            axis = cfg.axis_fallback
+            warnings.warn(
+                f"gyro axes {'xyz'[measured]} and {'xyz'[runner_up]} carry "
+                f"similar rotation (sd {sd[measured]:.0f} vs "
+                f"{sd[runner_up]:.0f}, ratio {sd[measured]/max(sd[runner_up],1e-9):.2f} "
+                f"< {cfg.axis_margin}), so measuring the sagittal axis would "
+                f"decide on noise and can flip between trials. Using "
+                f"'{'xyz'[cfg.axis_fallback]}'. Set sagittal_axis explicitly "
+                f"for this mounting.", RuntimeWarning, stacklevel=2)
     else:
         axis = int(cfg.sagittal_axis)
         if axis >= g.shape[1]:
