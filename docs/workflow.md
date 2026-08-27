@@ -90,6 +90,12 @@ stretch of walking can be mistaken for the third movement.
 > were in a walking boot. Swing the whole lower leg from the knee about ten
 > times, so the foot and shank move together as one piece.
 
+Do all three on one leg, then all three on the other — **each leg needs its own
+calibration**, since the axis is measured in each sensor's own frame. One
+recording covers both: while one leg is working the other is still, so nothing
+on the idle leg gets classified and the two do not interfere. About 70 seconds
+for the pair.
+
 Each movement does one job. **A** measures the ankle axis as the foot's sensor
 sees it, **B** measures the same axis as the shank's sensor sees it, and **C**
 settles the sign between them — which is the part that actually broke: with the

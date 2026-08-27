@@ -585,7 +585,12 @@ FUNCTIONAL_CALIBRATION = (
     "times. Only the shank moves.\n"
     "  C. Sit with the foot off the ground and hold the ankle stiff, as if it "
     "were in a walking boot. Swing the whole lower leg from the knee about ten "
-    "times, so the foot and shank move together as one piece."
+    "times, so the foot and shank move together as one piece.\n"
+    "\nEach leg needs its own calibration -- the axis is measured in each "
+    "sensor's own frame, so one leg's cannot stand in for the other's. One "
+    "recording covers both: do all three movements on one leg, then all three "
+    "on the other. While one leg works the other is still, so the two do not "
+    "interfere."
 )
 
 _PART_NAMES = {"foot": "A (foot moves, shank still)",

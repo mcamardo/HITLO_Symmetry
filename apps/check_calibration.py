@@ -196,7 +196,9 @@ def rehearse():
     print("seconds each, and pause a beat between them.\n")
     for line in FUNCTIONAL_CALIBRATION.splitlines()[1:]:
         print("   " + line.strip())
-    print(f"\n{DIM}Record them as their own file, before the walking trials.")
+    print(f"\n{DIM}Do all three on one leg, then all three on the other --")
+    print(f"each leg needs its own. One recording covers both.")
+    print(f"\nRecord them as their own file, before the walking trials.")
     print(f"Do not fold them into a walking trial: walking can be mistaken")
     print(f"for the third movement.{OFF}\n")
     print("Then stop the recording and run:\n")
