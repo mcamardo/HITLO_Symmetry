@@ -913,6 +913,53 @@ def test_double_detection_on_one_leg_is_caught():
     return ("clean trial passes; doubled, halved and unsteady trials each warn")
 
 
+
+def test_mismatched_mounting_between_legs_is_caught():
+    """Two shanks resolving to different rotation axes must be flagged.
+
+    The detector picks each leg's axis independently and falls back to z when
+    nothing dominates. Both are reasonable alone, neither announces itself, and
+    together they let a mounting difference read as a gait difference. P017
+    run-003 had the left shank on x and the right on y and produced a symmetry
+    index of +67.89%.
+    """
+    from hitlo.symmetry import axis_agreement
+    from hitlo.io import SensorStream
+
+    fs, n = 148.0, 4000
+    t = np.arange(n) / fs
+    swing = 130 * np.sin(2 * np.pi * 0.9 * t)
+    quiet = np.random.default_rng(0).normal(0, 8, n)
+
+    def shank(axis):
+        g = np.column_stack([quiet, quiet * 0.9, quiet * 1.1])
+        g[:, axis] = swing
+        return SensorStream(accel=np.tile([0, 0, -1.0], (n, 1)), timestamps=t + 1000.0,
+                            actual_fs=fs, name="s", gyro=g, side="left",
+                            backend="trigno")
+
+    assert axis_agreement(shank(2), shank(2)) == [], (
+        "flagged a matched pair where both legs sit on the same clear axis")
+
+    warns = axis_agreement(shank(0), shank(1))
+    assert any("different rotation axes" in w for w in warns), (
+        f"missed two legs measured about different axes: {warns}")
+
+    # an ambiguous mounting: no axis dominates, so the pick is near-arbitrary
+    g = np.column_stack([swing, swing * 0.95, quiet])
+    amb = SensorStream(accel=np.tile([0, 0, -1.0], (n, 1)), timestamps=t + 1000.0,
+                       actual_fs=fs, name="s", gyro=g, side="left", backend="trigno")
+    assert any("No clear axis" in w for w in axis_agreement(amb, amb)), (
+        "missed a mounting where two axes carry the same motion")
+
+    # accelerometer-only streams have no axis to check and must not crash
+    flat = SensorStream(accel=np.tile([0, 0, -1.0], (n, 1)), timestamps=t + 1000.0,
+                        actual_fs=fs, name="s", gyro=None, side="left", backend="polar")
+    assert axis_agreement(flat, flat) == []
+
+    return "matched pair silent; split axes and ambiguous mountings both warn"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

@@ -211,6 +211,61 @@ def compute_symmetry_index(right_step_times: np.ndarray,
 # Physiologic-plausibility stride filter
 # ===========================================================================
 
+def axis_agreement(left, right, window=None) -> List[str]:
+    """Are both shanks being measured about the same rotation?
+
+    The gyro detector picks each leg's sagittal axis independently from that
+    leg's own motion, and falls back to z when no axis clearly dominates. Both
+    behaviours are reasonable in isolation and neither announces itself, so a
+    mounting that leaves two axes carrying similar motion produces a quiet
+    degradation rather than an error.
+
+    P017 run-003 is the case that matters: the left shank resolved to x and the
+    right to y, at dominance 1.37 and 1.34. The two legs were measured about
+    different rotations, and the right leg's detector counted every stride
+    twice. Meanwhile run-004, on a firmer mounting, gave 2.45 and 1.96 on the
+    same axis for both legs and produced a clean trial.
+
+    Diagnostic only -- this changes no detection and no symmetry index.
+    """
+    out: List[str] = []
+    if not (getattr(left, 'has_gyro', False) and getattr(right, 'has_gyro', False)):
+        return out
+
+    picked, doms = {}, {}
+    for name, stream in (("left", left), ("right", right)):
+        t = np.asarray(stream.timestamps, dtype=np.float64)
+        g = np.asarray(stream.gyro, dtype=np.float64)
+        m = slice(None)
+        if window is not None:
+            sel = (t >= window[0]) & (t <= window[1])
+            if sel.sum() > 100:
+                m = sel
+        sd = g[m].std(axis=0)
+        order = np.argsort(sd)[::-1]
+        picked[name] = int(order[0])
+        doms[name] = float(sd[order[0]] / max(sd[order[1]], 1e-9))
+
+    if picked["left"] != picked["right"]:
+        out.append(
+            f"The two shanks resolve to different rotation axes "
+            f"({'xyz'[picked['left']]} on the left, {'xyz'[picked['right']]} on "
+            f"the right). The legs are being measured about different "
+            f"rotations, so their step times are not comparable. Almost always "
+            f"a mounting difference between the two sensors.")
+
+    weak = [n for n in ("left", "right") if doms[n] < 1.6]
+    if weak:
+        detail = ", ".join(f"{n} {doms[n]:.2f}x" for n in weak)
+        out.append(
+            f"No clear axis of rotation on the {' and '.join(weak)} shank "
+            f"({detail}; a firm mounting gives 2x or more). Two axes carry "
+            f"similar motion, so the axis chosen is close to arbitrary and may "
+            f"differ from trial to trial. Re-seat the sensor before trusting "
+            f"small changes in symmetry.")
+    return out
+
+
 def leg_consistency(left_times: np.ndarray,
                     right_times: np.ndarray,
                     per_stride_si: Optional[np.ndarray] = None,

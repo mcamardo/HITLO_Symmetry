@@ -39,6 +39,7 @@ from hitlo.detectors import detect as detect_strikes, detector_name
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index,
     trim_peaks, filter_implausible_strides, walking_window, leg_consistency,
+    axis_agreement,
 )
 from hitlo.io import (load_both_polar_streams, load_polar_stream,
                       load_streams, trial_filename)
@@ -311,6 +312,9 @@ class SymmetryCost:
         # legal, and such a trial reached the optimizer with no warning at all.
         # See leg_consistency().
         warnings.extend(leg_consistency(left_times, right_times, per_stride))
+
+        # Mounting quality, from the streams themselves. Diagnostic only.
+        warnings.extend(axis_agreement(left, right, win))
 
         # The cost IS the symmetry index. No shape penalty: every configuration
         # BO can reach already satisfies the shape constraints by construction,
