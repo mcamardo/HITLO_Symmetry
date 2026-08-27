@@ -74,6 +74,7 @@ Standalone tools, if you prefer the terminal:
 ./apps/dry_run.py               # practise a session with no hardware
 streamlit run apps/trial_explorer.py   # browse recordings and detection
 ./apps/preflight.py             # pre-session readiness check
+./apps/check_calibration.py     # did the ankle axis calibration take?
 ./apps/verify_sides.py          # confirm which stream is which leg
 ./apps/diagnose_trial.py FILE   # per-trial QC plots
 ./apps/compare_detectors.py FILE  # accel vs gyro on the same recording
@@ -105,6 +106,7 @@ HITLO_Symmetry/
 │   ├── preflight.py               # pre-session readiness check
 │   ├── verify_sides.py            # confirm stream-to-leg mapping
 │   ├── trial_explorer.py          # browse any recording, interactively
+│   ├── check_calibration.py       # ankle axis calibration checker
 │   ├── dry_run.py                 # whole optimization, simulated, no hardware
 │   ├── diagnose_trial.py          # standalone trial QC plotter
 │   ├── compare_detectors.py       # accel vs gyro on one recording

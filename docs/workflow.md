@@ -97,10 +97,22 @@ relative sign wrong, the two segments' swings add instead of cancelling, and
 that is where 140° came from.
 
 The order does not matter and the parts do not need marking; they are
-identified automatically by which segment is moving. `trial_explorer` reports
-whether each movement isolated one axis, whether A and B found the same axis,
-and whether the ankle really stayed locked during C, and refuses the
-calibration rather than producing a plausible wrong magnitude.
+identified automatically by which segment is moving.
+
+**Check it before the sensors come off.** Either the console's
+**Sensors → 3b · Ankle axis calibration**, or from a terminal:
+
+```bash
+./apps/check_calibration.py              # checks the newest recording
+./apps/check_calibration.py --rehearse   # the protocol, and what to run after
+./apps/check_calibration.py --demo       # what pass and fail look like
+```
+
+It reports whether each movement isolated one axis, whether A and B found the
+same axis, and whether the ankle really stayed locked during C, and refuses
+the calibration rather than producing a plausible wrong magnitude. Some
+failures are not visible by eye — leaving the ankle loose during C passes the
+amplitude check at 1.12 and fails only on the residual, at 50%.
 
 Recovered a known ankle excursion to within 0.03° in simulation across four
 sensor mountings and three ranges of motion. It is mounting-independent by
