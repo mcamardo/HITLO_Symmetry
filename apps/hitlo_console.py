@@ -2060,10 +2060,17 @@ def _optimization_phase(config, signed):
                 setup_line += (" DF condition — the controller renders this as "
                                "τ_cable = τ_desired − τ_band(θ), since the "
                                "bands are always on.")
+        # Built with trial_filename, never spelled out here: the modality
+        # suffix follows the backend ('motion' for Trigno, 'eeg' for Polar),
+        # and a hardcoded one told the operator to save a name the console
+        # then waited for forever.
+        want_name = trial_filename(
+            config['Subject']['id'], config['Subject']['session'], trial_num,
+            modality=backend_modality(config))
         st.markdown(f"""
         1. {setup_line}
         2. LabRecorder: Block/Task = `Default`, Run = `{trial_num}` →
-           `sub-{config['Subject']['id']}_ses-{config['Subject']['session']}_task-Default_run-{trial_num:03d}_eeg.xdf`
+           `{want_name}`
         3. Walk {config['Cost']['time']} s · Stop · Analyze below.
         """)
 
