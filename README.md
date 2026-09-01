@@ -72,6 +72,7 @@ Standalone tools, if you prefer the terminal:
 
 ```bash
 ./apps/dry_run.py               # practise a session with no hardware
+./apps/make_fake_trial.py       # synthetic XDF trials to click through the console
 streamlit run apps/trial_explorer.py   # browse recordings and detection
 ./apps/preflight.py             # pre-session readiness check
 ./apps/check_calibration.py     # did the ankle axis calibration take?
@@ -106,6 +107,7 @@ HITLO_Symmetry/
 │   ├── preflight.py               # pre-session readiness check
 │   ├── verify_sides.py            # confirm stream-to-leg mapping
 │   ├── trial_explorer.py          # browse any recording, interactively
+│   ├── make_fake_trial.py         # write synthetic XDF trials
 │   ├── check_calibration.py       # ankle axis calibration checker
 │   ├── dry_run.py                 # whole optimization, simulated, no hardware
 │   ├── diagnose_trial.py          # standalone trial QC plotter

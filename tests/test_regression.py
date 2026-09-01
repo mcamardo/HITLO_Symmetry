@@ -11,6 +11,7 @@ time. The common thread is that none of them raised an error — they returned
 plausible-looking wrong answers, or nothing at all.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -958,6 +959,67 @@ def test_mismatched_mounting_between_legs_is_caught():
     assert axis_agreement(flat, flat) == []
 
     return "matched pair silent; split axes and ambiguous mountings both warn"
+
+
+
+def test_console_cost_extractor_reads_trigno_files():
+    """The optimizer's own extractor must handle the configured backend.
+
+    hitlo_console built SymmetryCost without passing config=, so it fell back
+    to the historical Polar behaviour and every Trigno trial failed with "No
+    usable accel stream in the file" -- at the moment a trial was accepted,
+    with a participant on the treadmill.
+
+    It hid because no other part of the console shares that object: the Sensors
+    and Run pages read the backend from the config directly and the trial
+    explorer builds its own extractor, so a recording could be made, viewed and
+    its symmetry index read while this path had never once run on a Trigno
+    file. apps/dry_run.py could not catch it either, because it substitutes a
+    fake extractor and never touches a file.
+
+    So this writes real XDF bytes and reads them back through the real one.
+    """
+    import tempfile
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'apps'))
+    from make_fake_trial import make_trial, write_xdf
+    from hitlo.cost import SymmetryCost
+
+    trigno = {'Sensing': {'backend': 'trigno', 'detector': 'gyro'},
+              'Cost': {'sample_rate': 148}}
+    want = -6.0
+
+    with tempfile.TemporaryDirectory() as d:
+        fname = 'sub-T001_ses-S001_task-Default_run-001_motion.xdf'
+        data, labels, ts = make_trial(si_percent=want, seconds=60.0, seed=3)
+        write_xdf(os.path.join(d, fname), 'TrignoIMU', labels, data, ts)
+
+        # with the config, as the console now builds it
+        ok = SymmetryCost(trial_data_dir=d, config=trigno, signed=True,
+                          trim_seconds=1.0)
+        res = ok.analyze_trial(trial_num=1, filename=fname, verbose=False)
+        assert res is not None, (
+            f"the configured extractor could not read a Trigno file: "
+            f"{ok.last_failure}")
+        got = res.symmetry_index
+        assert abs(got - want) < 1.0, (
+            f"synthetic trial asked for SI {want:+.1f}% and measured "
+            f"{got:+.2f}%. A factor-of-two slip in the step-time placement "
+            f"looks exactly like this and is otherwise invisible.")
+        assert got < 0, "sign lost: a negative asymmetry came back positive"
+
+        # without it, the old console behaviour, which must NOT silently work
+        bad = SymmetryCost(trial_data_dir=d, signed=True, trim_seconds=1.0)
+        assert bad.detector == 'accel', (
+            "config=None no longer selects the Polar detector; this test's "
+            "premise needs rechecking")
+        assert bad.analyze_trial(trial_num=1, filename=fname,
+                                 verbose=False) is None, (
+            "the unconfigured extractor returned a number for a Trigno file -- "
+            "it should fail loudly rather than produce one from the wrong "
+            "detector")
+
+    return (f"synthetic Trigno trial round-trips: asked {want:+.1f}%, "
+            f"measured {got:+.2f}%; unconfigured extractor correctly refuses")
 
 
 def main() -> int:
