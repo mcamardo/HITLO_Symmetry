@@ -482,6 +482,13 @@ def initialize_system(fresh_start: bool = False) -> Tuple[bool, bool]:
         signed=signed,
         si_target=si_target,
         trim_seconds=trim_s,
+        # Without this the extractor falls back to the historical Polar
+        # behaviour -- the accelerometer detector reading 'polar accel left'
+        # and 'polar accel right' -- and every Trigno trial fails with "No
+        # usable accel stream". The console's own pages read the backend from
+        # the config, so the failure only appears at the moment a trial is
+        # accepted, with a participant on the treadmill.
+        config=config,
     )
 
     # HIL_Exo loads and validates the index table. A missing or malformed CSV
