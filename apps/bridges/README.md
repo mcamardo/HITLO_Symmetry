@@ -6,16 +6,37 @@ bridge is the only place that knows about a vendor SDK or wire protocol.
 | bridge | hardware | stream | rate |
 |---|---|---|---|
 | `../collect_sensors.py` | Polar H10 over BLE | `polar accel left` / `polar accel right`, one per side | ~200 Hz |
-| `trigno_bridge.py` *(to add)* | Delsys Trigno Avanti via Trigno Control Utility | `TrignoIMU`, one stream for all sensors | ~148 Hz |
+| `trigno_lsl_bridge.py` | Delsys Trigno Avanti via Trigno Control Utility | `TrignoIMU`, one stream for all sensors | ~148 Hz |
 
 Full hardware walkthrough — sensor modes, channel allocation, slot mapping and
 the failure modes that silently scramble body parts — is in
 [docs/trigno_setup.md](../../docs/trigno_setup.md).
 
-## Adding the Trigno bridge
+## The Trigno bridge
 
-Drop the working script in here as `trigno_bridge.py`. For the repo to
-consume it unchanged, the LSL outlet needs to satisfy two things:
+Runs on the Windows base-station machine, not here. `trigno_lsl_bridge.py` in
+this directory is the version under source control; keep the copy on that
+machine in step with it.
+
+Three startup steps happen before the outlet opens, in this order, because
+each depends on the one before:
+
+1. **Side identification** — shake one sensor at a time and the bridge assigns
+   the label from what actually moves. `SENSOR_MAP` is the fallback only.
+   Slot numbers shift whenever sensors are paired or re-moded, and a stale map
+   inverts the symmetry index while producing entirely plausible numbers.
+2. **Gyro bias** — five seconds of quiet standing, per-axis mean subtracted
+   from every published gyro sample and written into the stream metadata so
+   the XDF records what was taken off. Accelerometers are left alone; their
+   offset is not separable from gravity.
+3. **Accelerometer sanity** — mean magnitude over the first second, warned once
+   if any sensor sits outside 0.85–1.15 g.
+
+Zero-filled frames arrive right after `START` and are skipped by all three
+rather than averaged in.
+
+For the repo to consume the stream unchanged, the LSL outlet needs to satisfy
+two things:
 
 **1. Declare channel labels.** `hitlo.io.load_trigno_streams` splits left from
 right by reading them, and **refuses to load if they are missing** rather than
