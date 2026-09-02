@@ -20,13 +20,18 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from hitlo.palette import (LEFT, RIGHT, LEFT_DK, RIGHT_DK, MUTE, REJECT,
+                           STRICT, RECOVERY, CLUSTER_MULTI,
+                           CLUSTER_SINGLE, TRIM)
+
 
 def _import_hitlo(repo_root: Path):
     """Make the hitlo package importable, then import what we need."""
     sys.path.insert(0, str(repo_root))
     try:
         from hitlo.detection import detect_heelstrikes_full, DetectionConfig
-        from hitlo.io import load_both_polar_streams
+        from hitlo.io import load_streams
         from hitlo.symmetry import (
             compute_step_times, compute_symmetry_index, trim_peaks,
         )
@@ -35,16 +40,21 @@ def _import_hitlo(repo_root: Path):
             f"Could not import the hitlo package ({e}).\n"
             f"Run this from your repo root, or pass --repo /path/to/HITLO_Symmetry."
         )
-    return (detect_heelstrikes_full, DetectionConfig, load_both_polar_streams,
+    return (detect_heelstrikes_full, DetectionConfig, load_streams,
             compute_step_times, compute_symmetry_index, trim_peaks)
 
 
 def analyze(xdf_path, trim_seconds, hitlo):
-    (detect_heelstrikes_full, DetectionConfig, load_both_polar_streams,
+    (detect_heelstrikes_full, DetectionConfig, load_streams,
      compute_step_times, compute_symmetry_index, trim_peaks) = hitlo
 
     cfg = DetectionConfig()  # same defaults as the BO cost
-    left, right = load_both_polar_streams(str(xdf_path))
+    # Backend-aware: the Polar-only loader could not open a Trigno
+    # recording at all, so this script failed on every file the lab
+    # now produces.
+    backend = 'trigno' if str(xdf_path).endswith('_motion.xdf') else 'polar'
+    left, right = load_streams(str(xdf_path),
+                               {'Sensing': {'backend': backend}})
     if left is None or right is None:
         sys.exit("Could not load XDF or one of the streams is missing.")
 
@@ -125,8 +135,8 @@ def make_plot(qc, trim_seconds, save_path=None):
 
     def shade_trim(ax):
         if trim_seconds > 0:
-            ax.axvspan(0, trim_lo, color='gray', alpha=0.18)
-            ax.axvspan(trim_hi, max_t, color='gray', alpha=0.18)
+            ax.axvspan(0, trim_lo, color=TRIM, alpha=0.18)
+            ax.axvspan(trim_hi, max_t, color=TRIM, alpha=0.18)
 
     def shade_clusters(ax, clusters, ts):
         for (cstart, cend) in clusters:
@@ -134,24 +144,24 @@ def make_plot(qc, trim_seconds, save_path=None):
                 continue
             if cstart == cend:
                 ax.axvspan(ts[cstart] - 0.04, ts[cend] + 0.04,
-                           color='limegreen', alpha=0.15)
+                           color=CLUSTER_SINGLE, alpha=0.13)
             else:
-                ax.axvspan(ts[cstart], ts[cend], color='salmon', alpha=0.22)
+                ax.axvspan(ts[cstart], ts[cend], color=CLUSTER_MULTI, alpha=0.16)
 
     # ---- LEFT magnitude ----
     ax = axes[0]
     shade_clusters(ax, lr.cluster_info, t_left)
-    ax.plot(t_left, lr.magnitude, color='steelblue', lw=1.0, alpha=0.75,
+    ax.plot(t_left, lr.magnitude, color=LEFT, lw=1.0, alpha=0.75,
             label='L magnitude')
     ax.axhline(np.median(lr.magnitude), color='gray', ls='-.', lw=1,
                label=f'baseline ({np.median(lr.magnitude):.0f})')
     if len(lr.heel_strike_indices) > 0:
         safe = lr.heel_strike_indices[lr.heel_strike_indices < len(lr.magnitude)]
-        ax.plot(t_left[safe], lr.magnitude[safe], 'v', color='navy',
+        ax.plot(t_left[safe], lr.magnitude[safe], 'v', color=LEFT_DK,
                 ms=8, label=f'accepted ({len(lr.heel_strike_indices)})')
     if len(lr.rejected_peaks) > 0:
         safe = lr.rejected_peaks[lr.rejected_peaks < len(lr.magnitude)]
-        ax.plot(t_left[safe], lr.magnitude[safe], 'x', color='gray',
+        ax.plot(t_left[safe], lr.magnitude[safe], 'x', color=REJECT,
                 ms=7, label=f'rejected ({len(lr.rejected_peaks)})')
     shade_trim(ax)
     ax.set_ylabel('|a|')
@@ -161,17 +171,17 @@ def make_plot(qc, trim_seconds, save_path=None):
     # ---- RIGHT magnitude ----
     ax = axes[1]
     shade_clusters(ax, rr.cluster_info, t_right)
-    ax.plot(t_right, rr.magnitude, color='tomato', lw=1.0, alpha=0.75,
+    ax.plot(t_right, rr.magnitude, color=RIGHT, lw=1.0, alpha=0.75,
             label='R magnitude')
     ax.axhline(np.median(rr.magnitude), color='gray', ls='-.', lw=1,
                label=f'baseline ({np.median(rr.magnitude):.0f})')
     if len(rr.heel_strike_indices) > 0:
         safe = rr.heel_strike_indices[rr.heel_strike_indices < len(rr.magnitude)]
-        ax.plot(t_right[safe], rr.magnitude[safe], 'v', color='darkred',
+        ax.plot(t_right[safe], rr.magnitude[safe], 'v', color=RIGHT_DK,
                 ms=8, label=f'accepted ({len(rr.heel_strike_indices)})')
     if len(rr.rejected_peaks) > 0:
         safe = rr.rejected_peaks[rr.rejected_peaks < len(rr.magnitude)]
-        ax.plot(t_right[safe], rr.magnitude[safe], 'x', color='gray',
+        ax.plot(t_right[safe], rr.magnitude[safe], 'x', color=REJECT,
                 ms=7, label=f'rejected ({len(rr.rejected_peaks)})')
     shade_trim(ax)
     ax.set_ylabel('|a|')
@@ -180,11 +190,14 @@ def make_plot(qc, trim_seconds, save_path=None):
 
     # ---- Jerk z overlay ----
     ax = axes[2]
-    ax.plot(t_left, lr.jerk_z, color='steelblue', lw=0.8, alpha=0.7, label='L jerk z')
-    ax.plot(t_right, rr.jerk_z, color='tomato', lw=0.8, alpha=0.7, label='R jerk z')
-    ax.axhline(qc['cfg'].strict_thresh, color='green', ls='--',
+    ax.plot(t_left, lr.jerk_z, color=LEFT, lw=0.8, alpha=0.7, label='L jerk z')
+    # Both legs share this axis, so the right one is dashed: colour is
+    # never the only thing telling them apart.
+    ax.plot(t_right, rr.jerk_z, color=RIGHT, lw=0.8, alpha=0.7, ls='--',
+            label='R jerk z')
+    ax.axhline(qc['cfg'].strict_thresh, color=STRICT, ls='--',
                label=f"{qc['cfg'].strict_thresh} SD strict")
-    ax.axhline(qc['cfg'].recovery_thresh, color='orange', ls=':',
+    ax.axhline(qc['cfg'].recovery_thresh, color=RECOVERY, ls=':',
                label=f"{qc['cfg'].recovery_thresh} SD recovery")
     shade_trim(ax)
     ax.set_ylabel('jerk z')

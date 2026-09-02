@@ -43,8 +43,8 @@ from hitlo.ankle_angle import (ankle_angle, stride_profile, verify_foot_side,
 from hitlo.detectors import detect, detector_name
 from hitlo.symmetry import compute_step_times, compute_symmetry_index
 
-RED, GRN, GREY = "#b5121b", "#4cae4f", "#9aa0a6"
-INK, MUTE, GRID = "#12131a", "#6b6f76", "#e2e4e8"
+from hitlo.palette import (LEFT as RED, RIGHT as GRN, REJECT as GREY,
+                           INK, MUTE, GRID)
 
 st.set_page_config(page_title="Trial Explorer", page_icon="🔎", layout="wide")
 

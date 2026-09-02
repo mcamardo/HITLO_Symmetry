@@ -97,6 +97,9 @@ from hitlo.ankle_angle import (functional_calibration,
 from hitlo.symmetry import (
     compute_step_times, compute_symmetry_index, trim_peaks,
 )
+from hitlo.palette import (LEFT, RIGHT, LEFT_DK, RIGHT_DK, REJECT,
+                           STRICT, RECOVERY, CLUSTER_MULTI,
+                           CLUSTER_SINGLE, TRIM)
 
 
 # Baseline trials use this BIDS task tag (LabRecorder Block/Task dropdown).
@@ -1201,16 +1204,16 @@ def plot_heelstrikes_last_trial(xdf_path: str, cfg: DetectionConfig,
             x0, x1 = ts[cstart], ts[cend]
             if cstart == cend:
                 fig.add_vrect(x0=x0 - 0.04, x1=x1 + 0.04,
-                              fillcolor='limegreen', opacity=0.15,
+                              fillcolor=CLUSTER_SINGLE, opacity=0.13,
                               layer='below', line_width=0, row=row_idx, col=1)
             else:
-                fig.add_vrect(x0=x0, x1=x1, fillcolor='salmon', opacity=0.22,
+                fig.add_vrect(x0=x0, x1=x1, fillcolor=CLUSTER_MULTI, opacity=0.16,
                               layer='below', line_width=0, row=row_idx, col=1)
 
     shade_clusters(1, qc['left_result'].cluster_info, t_left)
     fig.add_trace(go.Scatter(x=t_left, y=qc['left_result'].magnitude,
                              mode='lines', name='L magnitude',
-                             line=dict(color='steelblue', width=1.0),
+                             line=dict(color=LEFT, width=1.0),
                              opacity=0.75), row=1, col=1)
     baseline_l = float(np.median(qc['left_result'].magnitude))
     fig.add_hline(y=baseline_l, line_dash='dashdot', line_color='gray',
@@ -1221,7 +1224,7 @@ def plot_heelstrikes_last_trial(xdf_path: str, cfg: DetectionConfig,
         fig.add_trace(go.Scatter(
             x=t_left[safe], y=qc['left_result'].magnitude[safe],
             mode='markers', name=f"L accepted ({len(acc)})",
-            marker=dict(symbol='triangle-down', size=10, color='navy')
+            marker=dict(symbol='triangle-down', size=10, color=LEFT_DK)
         ), row=1, col=1)
     if len(qc['left_result'].rejected_peaks) > 0:
         rej = qc['left_result'].rejected_peaks
@@ -1229,13 +1232,13 @@ def plot_heelstrikes_last_trial(xdf_path: str, cfg: DetectionConfig,
         fig.add_trace(go.Scatter(
             x=t_left[safe], y=qc['left_result'].magnitude[safe],
             mode='markers', name=f"L rejected ({len(rej)})",
-            marker=dict(symbol='x', size=9, color='gray', line=dict(width=1.5))
+            marker=dict(symbol='x', size=9, color=REJECT, line=dict(width=1.5))
         ), row=1, col=1)
 
     shade_clusters(2, qc['right_result'].cluster_info, t_right)
     fig.add_trace(go.Scatter(x=t_right, y=qc['right_result'].magnitude,
                              mode='lines', name='R magnitude',
-                             line=dict(color='tomato', width=1.0),
+                             line=dict(color=RIGHT, width=1.0),
                              opacity=0.75), row=2, col=1)
     baseline_r = float(np.median(qc['right_result'].magnitude))
     fig.add_hline(y=baseline_r, line_dash='dashdot', line_color='gray',
@@ -1246,7 +1249,7 @@ def plot_heelstrikes_last_trial(xdf_path: str, cfg: DetectionConfig,
         fig.add_trace(go.Scatter(
             x=t_right[safe], y=qc['right_result'].magnitude[safe],
             mode='markers', name=f"R accepted ({len(acc)})",
-            marker=dict(symbol='triangle-down', size=10, color='darkred')
+            marker=dict(symbol='triangle-down', size=10, color=RIGHT_DK)
         ), row=2, col=1)
     if len(qc['right_result'].rejected_peaks) > 0:
         rej = qc['right_result'].rejected_peaks
@@ -1254,28 +1257,28 @@ def plot_heelstrikes_last_trial(xdf_path: str, cfg: DetectionConfig,
         fig.add_trace(go.Scatter(
             x=t_right[safe], y=qc['right_result'].magnitude[safe],
             mode='markers', name=f"R rejected ({len(rej)})",
-            marker=dict(symbol='x', size=9, color='gray', line=dict(width=1.5))
+            marker=dict(symbol='x', size=9, color=REJECT, line=dict(width=1.5))
         ), row=2, col=1)
 
     fig.add_trace(go.Scatter(x=t_left, y=qc['left_result'].jerk_z,
                              mode='lines', name='L jerk z',
-                             line=dict(color='steelblue', width=0.8),
+                             line=dict(color=LEFT, width=0.8),
                              opacity=0.7), row=3, col=1)
     fig.add_trace(go.Scatter(x=t_right, y=qc['right_result'].jerk_z,
                              mode='lines', name='R jerk z',
-                             line=dict(color='tomato', width=0.8),
+                             line=dict(color=RIGHT, width=0.8, dash='dash'),
                              opacity=0.7), row=3, col=1)
-    fig.add_hline(y=qc['cfg'].strict_thresh, line_dash='dash', line_color='green',
+    fig.add_hline(y=qc['cfg'].strict_thresh, line_dash='dash', line_color=STRICT,
                   annotation_text=f"{qc['cfg'].strict_thresh} SD strict", row=3, col=1)
-    fig.add_hline(y=qc['cfg'].recovery_thresh, line_dash='dot', line_color='orange',
+    fig.add_hline(y=qc['cfg'].recovery_thresh, line_dash='dot', line_color=RECOVERY,
                   annotation_text=f"{qc['cfg'].recovery_thresh} SD recovery",
                   row=3, col=1)
 
     if trim_seconds > 0:
         for row in (1, 2, 3):
-            fig.add_vrect(x0=0, x1=trim_lo_rel, fillcolor='gray', opacity=0.18,
+            fig.add_vrect(x0=0, x1=trim_lo_rel, fillcolor=TRIM, opacity=0.18,
                           layer='below', line_width=0, row=row, col=1)
-            fig.add_vrect(x0=trim_hi_rel, x1=max_t, fillcolor='gray', opacity=0.18,
+            fig.add_vrect(x0=trim_hi_rel, x1=max_t, fillcolor=TRIM, opacity=0.18,
                           layer='below', line_width=0, row=row, col=1)
 
     if not np.isnan(qc['si_signed']):
@@ -1296,8 +1299,8 @@ def plot_heelstrikes_last_trial(xdf_path: str, cfg: DetectionConfig,
              f"→ {len(qc['left_result'].heel_strike_indices)} heel strikes  |  "
              f"R: {len(qc['right_result'].all_candidates)} candidates "
              f"→ {len(qc['right_result'].heel_strike_indices)} heel strikes<br>"
-             f"<sup>{subtitle}  |  pink = multi-peak cluster, "
-             f"green = singleton cluster</sup>")
+             f"<sup>{subtitle}  |  violet = multi-peak cluster, "
+             f"teal = singleton cluster</sup>")
 
     fig.update_layout(
         title=title, height=720, margin=dict(l=50, r=20, t=100, b=40),
