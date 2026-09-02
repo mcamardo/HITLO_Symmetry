@@ -233,6 +233,132 @@ def make_plot(qc, trim_seconds, save_path=None):
 DEFAULT_REPO = str(Path(__file__).resolve().parent.parent)
 
 
+# ---------------------------------------------------------------------------
+# Gyro QC
+# ---------------------------------------------------------------------------
+#
+# The panels above are the accelerometer detector's own diagnostics -- jerk
+# z-scores, candidate clusters, rejections -- and none of that exists in the
+# gyro path, which finds a mid-swing peak and then the negative-going zero
+# crossing after it. Plotting the gyro pipeline against the accel plot's
+# furniture would show mostly empty axes, so it gets its own view: the signal
+# the decision is actually made on, the landmark, and the step times the
+# symmetry index is built from.
+
+
+def analyze_gyro(xdf_path, trim_seconds):
+    from hitlo.io import load_streams
+    from hitlo.detectors import detect
+    from hitlo.symmetry import (walking_window, compute_step_times,
+                                compute_symmetry_index, trim_peaks)
+
+    cfg = {'Sensing': {'backend': 'trigno', 'detector': 'gyro'}}
+    left, right = load_streams(str(xdf_path), cfg)
+    if left is None or right is None:
+        sys.exit("Could not load XDF or one of the streams is missing.")
+
+    win = walking_window(left, right)
+    t0 = min(float(left.timestamps[0]), float(right.timestamps[0]))
+    lo = float(win[0]) if win else t0
+    hi = float(win[1]) if win else max(float(left.timestamps[-1]),
+                                       float(right.timestamps[-1]))
+
+    out = {'t0': t0, 'win': (lo - t0, hi - t0), 'had_window': win is not None,
+           'trim': trim_seconds}
+    for name, S in (('left', left), ('right', right)):
+        t = np.asarray(S.timestamps, dtype=np.float64)
+        g = np.asarray(S.gyro, dtype=np.float64)
+        m = (t >= lo) & (t <= hi)
+        sd = g[m].std(axis=0) if m.sum() > 10 else g.std(axis=0)
+        order = np.argsort(sd)[::-1]
+        ax = int(order[0])
+        # Orient the trace the way the detector does -- larger lobe positive.
+        # Mounting decides which way a shank's sagittal axis points, so without
+        # this one leg is drawn upside down relative to the other and the two
+        # panels look like different signals when they are the same gait.
+        w = g[:, ax]
+        wm = w[m] if m.sum() > 10 else w
+        flipped = abs(float(wm.min())) > abs(float(wm.max()))
+        if flipped:
+            w = -w
+        hs = np.asarray(detect(S, cfg).heel_strike_times, dtype=np.float64)
+        out[name] = dict(t=t - t0, w=w, axis=ax, flipped=flipped,
+                         dominance=float(sd[order[0]] / max(sd[order[1]], 1e-9)),
+                         hs=np.sort(hs) - t0)
+
+    l_times = trim_peaks(out['left']['hs'] + t0, lo, hi, trim_seconds)
+    r_times = trim_peaks(out['right']['hs'] + t0, lo, hi, trim_seconds)
+    out['n_left'], out['n_right'] = len(l_times), len(r_times)
+    r_steps, l_steps = compute_step_times(l_times, r_times)
+    n = min(len(r_steps), len(l_steps))
+    if n >= 2:
+        si, per = compute_symmetry_index(r_steps[:n], l_steps[:n], signed=True)
+        out.update(si=si, per=per, r_steps=r_steps[:n], l_steps=l_steps[:n],
+                   step_t=(np.asarray(l_times[:n]) - t0))
+    else:
+        out.update(si=np.nan, per=np.array([]), r_steps=np.array([]),
+                   l_steps=np.array([]), step_t=np.array([]))
+    return out
+
+
+def make_gyro_plot(qc, save_path=None):
+    fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
+    lo, hi = qc['win']
+
+    for ax, side, colour, dark in ((axes[0], 'left', LEFT, LEFT_DK),
+                                   (axes[1], 'right', RIGHT, RIGHT_DK)):
+        d = qc[side]
+        ax.axvspan(lo, hi, color=CLUSTER_SINGLE, alpha=0.07,
+                   label='walking window')
+        ax.plot(d['t'], d['w'], color=colour, lw=0.9, alpha=0.85,
+                label=f"{side} shank, gyro {'xyz'[d['axis']]}")
+        ax.axhline(0, color=MUTE, ls='-.', lw=1)
+        inside = d['hs'][(d['hs'] >= lo) & (d['hs'] <= hi)]
+        y = np.interp(inside, d['t'], d['w'])
+        # Counted in-window; the title's count is after the trim, so the two
+        # differ by whatever the trim removes. Labelled to say which is which.
+        ax.plot(inside, y, 'v', color=dark, ms=7,
+                label=f'heel strike ({len(inside)} in window)')
+        ax.set_ylabel('deg/s')
+        ax.set_title(f"{side.upper()} shank — sagittal axis "
+                     f"{'xyz'[d['axis']]}"
+                     + (" (inverted for display)" if d['flipped'] else "")
+                     + f", {d['dominance']:.2f}x dominant"
+                     + ("" if d['dominance'] >= 1.6 else
+                        "   (below 1.6x: axis choice is near-arbitrary)"),
+                     color=MUTE)
+        ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+
+    ax = axes[2]
+    if len(qc['step_t']):
+        ax.plot(qc['step_t'], qc['l_steps'], 'o-', color=LEFT, ms=4, lw=1.2,
+                label='left step (R->L)')
+        ax.plot(qc['step_t'], qc['r_steps'], 's--', color=RIGHT, ms=4, lw=1.2,
+                label='right step (L->R)')
+        ax.axhline(np.mean(qc['l_steps']), color=LEFT, ls=':', lw=1, alpha=0.7)
+        ax.axhline(np.mean(qc['r_steps']), color=RIGHT, ls=':', lw=1, alpha=0.7)
+        ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+    ax.set_ylabel('step time (s)')
+    ax.set_xlabel('time (s, rel. to earliest start)')
+    ax.set_title('Step times — the symmetry index is built from these, '
+                 'nothing else', color=MUTE)
+
+    sd = float(np.std(qc['per'])) if len(qc['per']) else float('nan')
+    fig.suptitle(
+        f"Gyro heel-strike QC — L: {qc['n_left']} strikes  |  "
+        f"R: {qc['n_right']} strikes  (after ±{qc['trim']:.0f}s trim)\n"
+        f"SI = {qc['si']:+.2f}% signed   |   per-stride sd {sd:.1f}   |   "
+        f"walking window {hi - lo:.0f}s"
+        + ("" if qc['had_window'] else "  (no window found, whole trial used)"),
+        fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    if save_path:
+        fig.savefig(save_path, dpi=140, facecolor=fig.get_facecolor())
+        print(f"Saved figure to {save_path}")
+    else:
+        plt.show()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Standalone heel-strike QC plot from an XDF.")
     ap.add_argument("xdf",
@@ -243,11 +369,19 @@ def main():
                     help="Repo root so `hitlo` is importable")
     ap.add_argument("--save", default=None,
                     help="Save PNG to this path instead of showing interactively")
+    ap.add_argument("--detector", choices=("accel", "gyro"), default="accel",
+                    help="Which detector's QC to draw. 'gyro' is what the "
+                         "Trigno pipeline actually scores with.")
     args = ap.parse_args()
 
     xdf_path = Path(args.xdf).expanduser()
     if not xdf_path.exists():
         sys.exit(f"File not found: {xdf_path}")
+
+    if args.detector == "gyro":
+        sys.path.insert(0, str(Path(args.repo).resolve()))
+        make_gyro_plot(analyze_gyro(xdf_path, args.trim), save_path=args.save)
+        return
 
     hitlo = _import_hitlo(Path(args.repo).resolve())
     qc = analyze(xdf_path, args.trim, hitlo)
