@@ -46,6 +46,9 @@ from hitlo.symmetry import (
 )
 from hitlo.io import load_streams, load_both_polar_streams
 from hitlo.detectors import detect as detect_strikes
+from hitlo.palette import (LEFT, RIGHT, LEFT_DK, RIGHT_DK, REJECT,
+                           STRICT, RECOVERY, CLUSTER_MULTI,
+                           CLUSTER_SINGLE, TRIM)
 
 
 # ===========================================================================
@@ -257,10 +260,10 @@ def plot_diagnostic(left_stream, right_stream,
                 continue
             x0, x1 = ts[cstart], ts[cend]
             if cstart == cend:
-                ax.axvspan(x0 - 0.04, x1 + 0.04, color='limegreen',
+                ax.axvspan(x0 - 0.04, x1 + 0.04, color=CLUSTER_SINGLE,
                            alpha=0.12, zorder=0)
             else:
-                ax.axvspan(x0, x1, color='salmon', alpha=0.22, zorder=0)
+                ax.axvspan(x0, x1, color=CLUSTER_MULTI, alpha=0.16, zorder=0)
 
     def plot_panel(ax, t, sig, accepted, rejected, title,
                    line_color, accept_color,
@@ -280,19 +283,19 @@ def plot_diagnostic(left_stream, right_stream,
                     label=f'accepted ({len(accepted)})')
         if len(rejected) > 0:
             safe = rejected[rejected < len(sig)]
-            ax.plot(t[safe], sig[safe], 'x', color='gray', ms=9, zorder=5,
+            ax.plot(t[safe], sig[safe], 'x', color=REJECT, ms=9, zorder=5,
                     mew=1.5, label=f'rejected ({len(rejected)})')
 
         if trim_lo_rel > t[0]:
-            ax.axvspan(t[0], trim_lo_rel, color='gray', alpha=0.15, zorder=0)
+            ax.axvspan(t[0], trim_lo_rel, color=TRIM, alpha=0.15, zorder=0)
         if trim_hi_rel < max_t:
-            ax.axvspan(trim_hi_rel, max_t, color='gray', alpha=0.15, zorder=0,
+            ax.axvspan(trim_hi_rel, max_t, color=TRIM, alpha=0.15, zorder=0,
                        label=f'trimmed')
 
         if threshold_line is not None:
-            ax.axhline(threshold_line[0], color='green', ls='--', lw=0.9, alpha=0.5,
+            ax.axhline(threshold_line[0], color=STRICT, ls='--', lw=0.9, alpha=0.5,
                        label=f'{threshold_line[0]} SD strict')
-            ax.axhline(threshold_line[1], color='orange', ls=':', lw=0.9, alpha=0.5,
+            ax.axhline(threshold_line[1], color=RECOVERY, ls=':', lw=0.9, alpha=0.5,
                        label=f'{threshold_line[1]} SD recovery')
 
         ax.set_title(title, fontsize=10, fontweight='bold')
@@ -303,14 +306,14 @@ def plot_diagnostic(left_stream, right_stream,
     plot_panel(axes[0], t_left, left_result.magnitude,
                left_result.heel_strike_indices, left_result.rejected_peaks,
                'LEFT — RAW MAGNITUDE (triangles = heel strikes; X = in-cluster rejected)',
-               'steelblue', 'navy',
+               LEFT, LEFT_DK,
                show_baseline=True, clusters=left_result.cluster_info)
     axes[0].set_ylabel('|a|')
 
     plot_panel(axes[1], t_left, left_result.jerk_z,
                left_result.heel_strike_indices, left_result.rejected_peaks,
                'LEFT — JERK (pink = multi-peak cluster, green = singleton)',
-               'steelblue', 'navy',
+               LEFT, LEFT_DK,
                threshold_line=(cfg.strict_thresh, cfg.recovery_thresh),
                clusters=left_result.cluster_info)
     axes[1].set_ylabel('z-score')
@@ -319,14 +322,14 @@ def plot_diagnostic(left_stream, right_stream,
     plot_panel(axes[2], t_right, right_result.magnitude,
                right_result.heel_strike_indices, right_result.rejected_peaks,
                'RIGHT — RAW MAGNITUDE (triangles = heel strikes; X = in-cluster rejected)',
-               'tomato', 'darkred',
+               RIGHT, RIGHT_DK,
                show_baseline=True, clusters=right_result.cluster_info)
     axes[2].set_ylabel('|a|')
 
     plot_panel(axes[3], t_right, right_result.jerk_z,
                right_result.heel_strike_indices, right_result.rejected_peaks,
                'RIGHT — JERK (pink = multi-peak cluster, green = singleton)',
-               'tomato', 'darkred',
+               RIGHT, RIGHT_DK,
                threshold_line=(cfg.strict_thresh, cfg.recovery_thresh),
                clusters=right_result.cluster_info)
     axes[3].set_ylabel('z-score')

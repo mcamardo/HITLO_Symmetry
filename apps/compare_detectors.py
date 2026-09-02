@@ -175,7 +175,11 @@ def _figure(left, right, res, path):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    BLUE, ORANGE, INK, SURF, GRID = "#2a78d6", "#eb6834", "#0b0b0b", "#fcfcfb", "#e4e3de"
+    # Detector identity, deliberately NOT the leg hues: this figure shows both
+    # in the same panel set, and BLUE previously meant "accel" in one panel and
+    # "left" in the next.
+    from hitlo.palette import LEFT, RIGHT, INK, GRID
+    BLUE, ORANGE, SURF = "#2a78d6", "#eb6834", "#fcfcfb"
     plt.rcParams.update({'figure.facecolor': SURF, 'axes.facecolor': SURF,
                          'savefig.facecolor': SURF, 'axes.edgecolor': GRID,
                          'text.color': INK, 'axes.spines.top': False,
@@ -191,7 +195,7 @@ def _figure(left, right, res, path):
                  loc='left', fontweight='bold')
     ax.grid(True, alpha=.5); ax.set_axisbelow(True)
     ax = axes[1]
-    for side, key, c in (('left', 'lt', BLUE), ('right', 'rt', ORANGE)):
+    for side, key, c in (('left', 'lt', LEFT), ('right', 'rt', RIGHT)):
         o = _pair_offsets(res['accel'][key], res['gyro'][key])
         if len(o):
             ax.hist(o, bins=24, alpha=.6, color=c, label=f'{side} (n={len(o)})')
