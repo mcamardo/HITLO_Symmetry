@@ -1,4 +1,4 @@
-# Shank IMU data: a primer
+# Shank IMU data
 
 You have a set of walking recordings from two leg-mounted sensors. This page
 gets you from a file to a number, and tells you how to know whether the number
