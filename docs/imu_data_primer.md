@@ -1,540 +1,264 @@
 # Shank IMU data: a primer
 
-This is an introduction to the inertial measurement unit (IMU) data collected
-on the shanks, written for someone who has just been handed a sample dataset
-and has not worked with this repo before. By the end you should be able to
-open a trial, find the heel strikes, compute a symmetry index, and tell
-whether the result is trustworthy.
+You have a set of walking recordings from two leg-mounted sensors. This page
+gets you from a file to a number, and tells you how to know whether the number
+is any good. Allow an afternoon.
 
-Work through it in order. The code examples build on each other, and every one
-of them has been run against a real recording.
+**Ignore the Polar backend.** This repo also supports an older chest-strap
+sensor. If you see `polar accel left`, `polar accel right`, or anything about a
+sternum-mounted sensor, it does not apply to your data.
 
-**Scope note.** This repo also contains an older Polar accelerometer backend.
-Ignore it. If you see anything referring to `polar accel left`, `polar accel
-right`, or a sternum-mounted sensor, it does not apply to the data you have.
-Everything below is the Trigno shank IMU path.
-
-**Two detectors, one current.** The file `docs/detection_pipeline.md`
-describes an accelerometer and jerk pipeline. That was the original method and
-it is no longer the one in use. The production config uses `detector: 'gyro'`,
-which finds heel strikes in the gyroscope signal instead. Read
-`docs/gyro_detection.md` for the current method. The accelerometer pipeline is
-worth understanding as background, and there is a section below on why it was
-not sufficient, but do not use it for new analysis.
+**Use the gyro detector.** There are two ways to find heel strikes in this
+repo. The old one uses the accelerometer and is described in
+`docs/detection_pipeline.md`. The current one uses the gyroscope and is
+described in `docs/gyro_detection.md`. Everything here uses the gyroscope.
 
 ---
 
-## 1. The hardware
+## 1. What you have
 
-Two Delsys Trigno Avanti IMUs, one on each shank. Each sensor carries a
-tri-axial accelerometer and a tri-axial gyroscope. Both are streamed over Lab
-Streaming Layer (LSL) and recorded into a single XDF file per trial, at about
-148 Hz.
-
-Points that matter for the analysis:
-
-| Fact | Consequence |
-| --- | --- |
-| The sensors are held on with Coban wrap | The mount is somewhat compliant, so impact shocks are damped |
-| Mounting orientation is not controlled | Which gyro axis is the sagittal one differs between sessions, and so does its sign |
-| Both sensors land in one LSL stream | The side is encoded in the channel label, not in the stream name |
-| Sample rate is about 148 Hz | One sample is about 6.8 ms, which is coarse for an impact and fine for a rotation |
-
-The uncontrolled mounting orientation is the single most important thing on
-that list. Nothing in the pipeline assumes the sensor is the right way up or
-the right way round. Section 3 explains how it works that out from the data.
-
----
-
-## 2. What is in an XDF file
-
-### 2.1 File naming
-
-Recordings follow a BIDS-style convention:
+Two Delsys Trigno IMUs, one strapped to each shank with Coban wrap. Each has an
+accelerometer and a gyroscope. Both stream into one file per trial at about
+148 Hz. The files look like this:
 
 ```
 sub-P091_ses-S001_task-Pre_run-001_motion.xdf
+    |          |         |        |
+ subject    session    phase    trial number
 ```
 
-Broken down:
+Three phases:
 
-| Part | Meaning |
+| `task-` | What it is |
 | --- | --- |
-| `sub-P091` | Subject identifier |
-| `ses-S001` | Session |
-| `task-Pre` | Which phase of the protocol |
-| `run-001` | Trial number within that phase |
-| `motion` | BIDS modality for IMU data |
-
-The task tag tells you what the trial was for:
-
-| Task | What it is |
-| --- | --- |
-| `Pre` | Baseline, recorded before optimization. `run-001` is familiarization and is ignored. `run-002` is the trial whose symmetry index defines the subject's baseline. |
-| `Default` | An optimization trial. One per device setting the optimizer tried. |
-| `Post` | Recorded after optimization, to see what carried over. |
-
-Files live under `~/HITLO_Data/sub-P0XX/ses-S001/motion/`.
-
-### 2.2 Loading a trial
-
-There is one LSL stream in the file, named `TrignoIMU`, holding every channel
-from both sensors. The loader splits it into two per-limb objects by reading
-the channel labels. You do not need to do that yourself.
-
-```python
-from hitlo.io import load_streams
-
-XDF = ('/Users/you/HITLO_Data/sub-P091/ses-S001/motion/'
-       'sub-P091_ses-S001_task-Pre_run-001_motion.xdf')
-
-cfg = {'Sensing': {'backend': 'trigno', 'detector': 'gyro'}}
-left, right = load_streams(XDF, cfg)
-
-if left is None or right is None:
-    raise SystemExit('one or both shank streams are missing from this file')
-```
-
-Always pass that `cfg` dictionary. `load_streams` defaults to the old Polar
-behaviour when it is not given one, and will return `(None, None)` on a Trigno
-file. The same dictionary selects the gyro detector later, so define it once
-at the top of your script and reuse it.
-
-`load_streams` returns `(left, right)`. Either can be `None`, which is why the
-guard above is there. A side comes back as `None` when its channels are absent
-or incomplete. The loader refuses to guess at column order, because a wrong
-guess would silently swap left and right, and that flips the sign of the final
-result.
-
-### 2.3 What you get back
-
-Each side is a `SensorStream`. Its fields:
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `accel` | ndarray, shape (N, 3) | Accelerometer, in g |
-| `gyro` | ndarray, shape (N, 3), or `None` | Gyroscope, in deg/s |
-| `timestamps` | ndarray, shape (N,) | LSL seconds. Not zero-based. |
-| `actual_fs` | float | Rate measured from the timestamps, not the nominal one |
-| `side` | str | `'left'` or `'right'` |
-| `name` | str | Source, for example `'TrignoIMU:left'` |
-| `backend` | str | `'trigno'` here |
-| `has_gyro` | property | `True` when gyro data is present and the right length |
-
-On a real trial that prints:
-
-```
-left.accel      (17854, 3)
-left.gyro       (17854, 3)
-left.timestamps (17854,)  first 2421606.259
-left.actual_fs  148.15
-left.side       'left'   left.name 'TrignoIMU:left'
-left.backend    'trigno'  has_gyro True
-```
-
-Two things to notice. The timestamps start at 2421606, not at zero, because
-LSL counts seconds from an arbitrary epoch. Subtract the first timestamp when
-you want a plot that starts at zero. And `actual_fs` is 148.15, not exactly
-148. Use the measured value, never the nominal one. Every detector window is
-specified in seconds and converted using the sample rate, so a wrong rate
-moves every window.
-
-To see which sensors a file contains before loading it:
-
-```python
-from hitlo.io import trigno_inventory
-print(trigno_inventory(XDF))     # {'left': ['shank'], 'right': ['shank']}
-```
-
-Some sessions also carry foot sensors. This primer covers shanks only.
+| `Pre` | Baseline, before anything was optimized |
+| `Default` | One optimization trial, one device setting |
+| `Post` | After optimization, to see what carried over |
 
 ---
 
-## 3. Finding heel strikes with the gyroscope
+## 2. Run this first
 
-### 3.1 The idea
-
-During walking the shank rotates forward quickly through swing. That produces
-one large, unmistakable peak in angular velocity. The rotation then reverses
-sharply when the foot hits the ground. Initial contact is the negative-going
-**zero crossing** immediately after the swing peak.
-
-A zero crossing is a sign change. There is no threshold to tune and no choice
-between competing peaks, which is what makes this robust. See
-`docs/gyro_detection.md` for the full rule and its validation.
-
-### 3.2 Axis selection, in two steps
-
-Because mounting is not controlled, the detector has to work out two things
-before it can apply that rule.
-
-**Step one: which axis is the sagittal one.** During walking, the axis the leg
-actually rotates about carries far more variance than the other two. So the
-detector takes the standard deviation of each gyro column and picks the
-largest.
+Save it in the repo root as `first_look.py`, change the path, and run
+`python first_look.py` from that directory. It has to be the repo root, or
+Python will not find `hitlo`.
 
 ```python
 import numpy as np
-
-sd = left.gyro.std(axis=0)
-order = np.argsort(sd)[::-1]
-axis = int(order[0])
-dominance = sd[order[0]] / sd[order[1]]
-
-print(f"per-axis sd (deg/s): x={sd[0]:.1f} y={sd[1]:.1f} z={sd[2]:.1f}")
-print(f"sagittal axis = {'xyz'[axis]}   dominance = {dominance:.2f}x")
-```
-
-On the trial above:
-
-```
-per-axis sd (deg/s): x=21.8 y=52.8 z=157.6
-sagittal axis = z   dominance = 2.99x
-```
-
-The ratio between the winner and the runner-up is called **dominance**, and it
-is a quality measure for the mounting. At 2.99x this sensor is clearly
-mounted. Below about 1.6x the two largest axes are close enough that the
-choice can flip between two trials of the same subject on noise alone, and the
-detector then reads a different physical rotation in each. The detector warns
-when dominance falls under 1.15x and falls back to the z axis. Treat anything
-under 1.6x as a trial to check by eye.
-
-**Step two: which sign is swing.** Mounting decides whether forward rotation
-reads positive or negative. Mid-swing is the fastest rotation in the gait
-cycle, so whichever polarity holds the larger excursion is swing. Flip the
-trace so that lobe is positive.
-
-```python
-w = left.gyro[:, axis]
-if abs(w.min()) > abs(w.max()):
-    w = -w
-print(f"largest positive {w.max():.0f}, largest negative {w.min():.0f}")
-# largest positive 380, largest negative -213
-```
-
-If you skip this step and the sensor happens to be mounted the other way
-round, the detector locks onto the stance reversal instead of the swing peak.
-Every event then lands at the wrong point in the cycle, while still looking
-like a clean, regular detection. That is the failure mode to fear here,
-because nothing about the output looks wrong.
-
-You do not have to write either step yourself. `detect` does both internally.
-They are shown here so you know what it is doing and why the QC plot reports
-an axis letter and a dominance number.
-
-### 3.3 Running the detector
-
-```python
+from hitlo.io import load_streams
 from hitlo.detectors import detect
+from hitlo.symmetry import (walking_window, trim_peaks,
+                            compute_step_times, compute_symmetry_index)
 
-res_left = detect(left, cfg)
-res_right = detect(right, cfg)
+XDF = '/path/to/sub-P091_ses-S001_task-Pre_run-001_motion.xdf'
+cfg = {'Sensing': {'backend': 'trigno', 'detector': 'gyro'}}
 
-print(res_left.heel_strike_times[:3])   # [2421607.292 2421608.401 2421609.507]
-print(len(res_left.heel_strike_times))  # 107
-```
+left, right = load_streams(XDF, cfg)
+if left is None or right is None:
+    raise SystemExit('a shank stream is missing from this file')
 
-`detect` returns a `DetectionResult`. The fields you will use:
-
-| Field | Meaning |
-| --- | --- |
-| `heel_strike_times` | Contact times in LSL seconds. This is the output that matters. |
-| `heel_strike_indices` | Sample index of each contact |
-| `all_candidates` | Every swing peak considered |
-| `strict_peaks` | Swing peaks that produced a valid crossing |
-| `rejected_peaks` | Swing peaks with no valid crossing after them |
-| `recovered_peaks` | Always empty for the gyro detector |
-
-The times are interpolated between samples rather than rounded to the nearest
-one. At 148 Hz a sample is 6.8 ms, and the symmetry index moves about 0.28
-points per millisecond of timing error, so rounding would inject roughly two
-points of noise for nothing.
-
-`recovered_peaks` is always empty because the recovery pass belongs to the
-accelerometer pipeline, which needed it to disambiguate competing peaks. A
-zero crossing is unique within a cycle, so there is nothing to recover.
-
-If you ask for gyro detection on a stream with no gyro, `detect` raises a
-`ValueError` rather than falling back to the accelerometer. That is
-deliberate. The two methods find different instants, so a silent fallback
-would produce a symmetry index that is not comparable with the rest of the
-session.
-
----
-
-## 4. Why not the accelerometer
-
-The original detector looked for the impact shock: filter the acceleration
-magnitude, differentiate to get jerk, threshold it, cluster the peaks, and
-pick one per cluster. It works, but it is fragile here, for reasons that are
-not tunable.
-
-| Problem | Number |
-| --- | --- |
-| The impact is barely sampled | About 2 samples wide at 148 Hz |
-| Its sampled height varies stride to stride | About 2.7x |
-| A soft strike barely clears the background | About 1.2 g against a 1.0 g walking baseline |
-
-No threshold separates those cases. The situation gets worse when the shock is
-damped, which is exactly what a Coban-wrapped sensor and an exoskeleton in the
-load path do. On two test subjects the accepted peak beat its rejected
-competitors by 4.4 standard deviations on the free leg and only 0.16 on the
-instrumented one. On the instrumented leg the detector was essentially
-guessing.
-
-The gyroscope does not have this problem because the swing rotation is large,
-slow, and smooth, and because a sign change needs no amplitude threshold at
-all.
-
-One consequence worth remembering: **the two detectors find different
-instants.** The gyro zero crossing is initial contact. The jerk peak is the
-shock that follows it, tens of milliseconds later. Do not compare a symmetry
-index from one against a baseline collected with the other.
-
----
-
-## 5. Trimming the trial
-
-A recording is not walking from end to end. The subject stands while the
-operator sets the device up, walks, and then stops while the recorder is still
-running. Those parts must come out before you compute anything.
-
-This happens in two stages.
-
-**Stage one, find the walking.** `walking_window` looks at the combined gyro
-activity of the two shanks and returns the longest continuous stretch above a
-threshold, as a pair of LSL timestamps.
-
-```python
-from hitlo.symmetry import walking_window
-
+# Find the stretch of the recording that is actually walking.
 win = walking_window(left, right)
 if win is None:
     t0 = min(left.timestamps[0], right.timestamps[0])
     t1 = max(left.timestamps[-1], right.timestamps[-1])
 else:
     t0, t1 = win
-print(f"window {t1 - t0:.1f} s, found={win is not None}")   # 120.3 s, found=True
+
+# Heel strikes, then drop the first and last 3 seconds of them.
+lt = trim_peaks(np.sort(detect(left, cfg).heel_strike_times), t0, t1, 3.0)
+rt = trim_peaks(np.sort(detect(right, cfg).heel_strike_times), t0, t1, 3.0)
+
+right_steps, left_steps = compute_step_times(lt, rt)
+si, per_stride = compute_symmetry_index(right_steps, left_steps, signed=True)
+
+print(f'{len(lt)} left strikes, {len(rt)} right strikes')
+print(f'SI = {si:+.2f} %   (stride to stride sd {per_stride.std():.2f})')
 ```
 
-Write that guard every time. `walking_window` returns `None` when there is no
-gyro, or when nothing clears the threshold for at least 10 seconds. It returns
-`None` rather than raising so a caller can fall back to the whole recording
-instead of losing the trial, but that means an unguarded `t0, t1 = ...` will
-crash with a confusing error on exactly the trials you most want to inspect.
+On `sub-P091` `task-Pre` `run-001` that prints:
 
-**Stage two, drop the edge strides.** `trim_peaks` removes heel strikes within
-`trim_s` seconds of each end of the window.
-
-```python
-from hitlo.symmetry import trim_peaks
-import numpy as np
-
-lt = trim_peaks(np.sort(res_left.heel_strike_times), t0, t1, 3.0)
-rt = trim_peaks(np.sort(res_right.heel_strike_times), t0, t1, 3.0)
-print(len(lt), len(rt))    # 103 102
+```
+103 left strikes, 102 right strikes
+SI = +0.97 %   (stride to stride sd 1.73)
 ```
 
-Three seconds is the usual value. Edge strides are dropped because starting
-and stopping have systematically different mechanics from steady walking.
-Shank accelerations are weaker during startup, and when a perturbation is
-first applied the first strides reflect a subject actively correcting rather
-than the adapted state you are trying to measure. Leaving them in biases the
-trial mean by an amount that varies with how briskly the subject got going,
-which is not something you want in your data.
+That is the whole pipeline. Everything below explains what those six steps did.
 
 ---
 
-## 6. Step times and the symmetry index
+## 3. What each step did
 
-### 6.1 Steps
+**Load.** One file holds both sensors in a single stream, and the side is
+written into the channel labels. `load_streams` splits them for you. It returns
+two objects, each with `accel`, `gyro`, `timestamps`, `actual_fs` and `side`.
+Either one can come back as `None`, which is why the script checks.
 
-A step is the gap from one foot's contact to the other foot's next contact.
+**Find the walking.** A recording is not walking end to end. The subject stands
+while the operator sets up, walks, then stops while the recorder is still
+going. `walking_window` returns the longest continuous stretch of real walking,
+as a pair of timestamps. It returns `None` when it cannot find one, so always
+write that `if win is None` fallback.
+
+**Detect.** `detect` finds one heel strike per stride in each leg's gyroscope
+signal. The rule: the shank swings forward fast, which makes a big peak, then
+reverses when the foot lands. Contact is the moment the signal crosses zero
+going downward, just after that peak. `docs/gyro_detection.md` has the details.
+
+Two things `detect` works out on its own, because the sensors are not mounted
+in a controlled orientation. First, which of the three gyro axes is the one the
+leg rotates about. It picks the axis with the most variation. Second, which
+direction is forward, since that depends on which way round the sensor was
+clipped on. It takes the bigger swing to be forward. You will see both reported
+in the QC plot as an axis letter and a "dominance" number.
+
+**Trim.** `trim_peaks` drops heel strikes in the first and last 3 seconds.
+Starting and stopping do not look like steady walking, and leaving them in
+biases the result.
+
+**Steps.** A step is one foot landing to the other foot landing.
 
 | Term | Definition |
 | --- | --- |
-| Right step | Left heel strike, then the next right heel strike |
-| Left step | Right heel strike, then the next left heel strike |
-| Stride | One step plus the following step, so one full gait cycle |
+| Right step | Left foot lands, then right foot lands |
+| Left step | Right foot lands, then left foot lands |
+| Stride | Two steps, so one full cycle |
 
-`compute_step_times` interleaves the two lists and returns both.
+`compute_step_times` returns right steps first, then left. Getting that
+backwards flips the sign of everything after it.
 
-```python
-from hitlo.symmetry import compute_step_times
-
-right_steps, left_steps = compute_step_times(lt, rt)
-print(right_steps.mean(), left_steps.mean())   # 0.561 0.556
-```
-
-Note the return order. Right steps come first. It is easy to swap them by
-accident, and a swap flips the sign of everything downstream.
-
-Both lists must be on a common time base, which is why the pipeline uses LSL
-timestamps throughout and never sample indices. The two sensors run at
-slightly different actual rates, so sample index 1000 is not the same instant
-on both.
-
-### 6.2 The symmetry index
+**Symmetry index.**
 
 ```
 SI = 2 × (right step − left step) / (right step + left step) × 100 %
 ```
 
-```python
-from hitlo.symmetry import compute_symmetry_index
-
-si, per_stride = compute_symmetry_index(right_steps, left_steps, signed=True)
-print(f"SI = {si:+.2f}%   sd = {per_stride.std():.2f}")   # SI = +0.97%   sd = 1.73
-```
-
-It returns two things: the mean across strides, and the per-stride values. The
-per-stride array is always signed, whatever you pass for `signed`. That flag
-only affects the mean.
-
-Interpretation:
-
 | SI | Meaning |
 | --- | --- |
-| 0 | Symmetric. The two steps take the same time. |
-| Greater than 0 | Right step is longer. The left leg spends longer in support. |
-| Less than 0 | Left step is longer. The right leg spends longer in support. |
-| About ±1 to ±2 | Within the normal range for a healthy walker |
-| About −9 | Roughly what wearing the unpowered device did to one subject, for scale |
-
-Keep `signed=True`. The direction is the measurement, not a detail. An
-unsigned index cannot tell a subject who improved from one who overshot past
-symmetry in the other direction.
+| 0 | Both steps take the same time |
+| Above 0 | Right step is longer |
+| Below 0 | Left step is longer |
+| About ±1 to ±2 | Normal for a healthy walker |
 
 ---
 
-## 7. The short way, and the QC plot
-
-Everything in sections 2 to 6 is wrapped in one function.
+## 4. Always look at the plot
 
 ```python
-from hitlo.plot_heelstrikes import analyze_gyro
+from hitlo.plot_heelstrikes import analyze_gyro, make_gyro_plot
 
-qc = analyze_gyro(XDF, 3.0)     # path, trim seconds
-print(f"SI {qc['si']:+.2f}%   L {qc['n_left']} strikes   R {qc['n_right']} strikes")
-# SI +0.97%   L 103 strikes   R 102 strikes
+qc = analyze_gyro(XDF, 3.0)       # does everything in section 2, in one call
+make_gyro_plot(qc)                # or make_gyro_plot(qc, save_path='qc.png')
 ```
 
-It returns a dictionary:
-
-| Key | Contents |
-| --- | --- |
-| `si` | Signed symmetry index |
-| `per` | Per-stride symmetry indices |
-| `n_left`, `n_right` | Heel strike counts after the trim |
-| `l_steps`, `r_steps` | Step times |
-| `step_t` | Time of each step, for plotting |
-| `win` | Walking window, relative to the start of the recording |
-| `had_window` | `False` when `walking_window` found nothing and the whole trial was used |
-| `left`, `right` | Per-side detail: `t`, `w` (oriented trace), `axis`, `flipped`, `dominance`, `hs` |
-| `t0`, `trim` | Time origin and the trim that was applied |
-
-Use it for anything routine. Write out the steps by hand when you are
-debugging a trial that looks wrong, because then you can print the
-intermediate values.
-
-To see the result rather than just the number:
-
-```python
-from hitlo.plot_heelstrikes import make_gyro_plot
-
-make_gyro_plot(qc)                                # opens a window
-make_gyro_plot(qc, save_path='p091_pre1_qc.png')  # or saves a file
-```
-
-You can also run it from the command line without writing a script:
+Or from the terminal, without writing a script:
 
 ```
-python hitlo/plot_heelstrikes.py <file.xdf> --detector gyro --trim 3.0 --save qc.png
+python hitlo/plot_heelstrikes.py <file.xdf> --detector gyro --trim 3.0
 ```
 
 The `--detector gyro` flag is required. The script still defaults to the old
 accelerometer view.
 
-The plot has three panels. The top two show each shank's oriented gyro trace
-with the detected strikes marked, titled with the axis that was chosen and its
-dominance. The bottom shows the step times the symmetry index was computed
-from.
+Three panels: each leg's signal with the detected strikes marked, then the step
+times underneath.
 
-**Look at this plot for every trial.** Not a sample of them, every one. A
-symmetry index is a single number summarizing a thousand events, and it will
-happily report a plausible value for a detection that is completely wrong. The
-plot is where wrong detection is visible and the number is where it is
-invisible. It takes about five seconds per trial.
+**Do this for every trial, not a sample of them.** A symmetry index is one
+number summarizing a thousand events, and it will report a perfectly plausible
+value for a detection that is completely wrong. The plot is where wrong
+detection is obvious. It takes five seconds.
 
 ---
 
-## 8. Sanity checks
+## 5. Is this trial any good
 
-Run through these before you believe a trial.
-
-| Check | What you want | What a failure means |
+| Check | Want | If not |
 | --- | --- | --- |
-| Event counts | Left and right within one or two of each other | One leg's detector is finding events the other is not |
-| Stride times | Both legs near the same value, typically 1.0 to 1.5 s | If one leg is close to half the other, that detector is counting each stride twice |
-| The two traces | Similar in shape, both with swing positive | If one looks like the mirror image of the other, the sign inference went the wrong way on one side |
-| Per-stride scatter | Standard deviation of a few points | A large value means the mean is not describing a steady gait |
-| Dominance | Above 1.6x on both sides | Below that, the axis choice is near-arbitrary and can differ between trials |
+| Strike counts | Left and right within one or two | One leg is finding events the other is not |
+| Stride times | Both legs similar, usually 1.0 to 1.5 s | If one is half the other, that leg is being counted twice |
+| Stride to stride sd | A few points | A big number means the average is not describing steady walking |
+| Dominance | Above 1.6 on both legs | Below that, the axis choice is close to a coin flip |
+| The two traces | Similar shape | If one looks upside down, the direction was picked wrong on that leg |
 
-The trial used throughout this primer passes all five: 103 against 102 events,
-stride times of 1.118 s with a range of 1.082 to 1.162, per-stride standard
-deviation of 1.73, dominance 2.99x.
+The example trial passes all five: 103 against 102 strikes, 1.117 s strides,
+sd 1.73, dominance 2.98 and 2.63.
 
-For contrast, here is a real failure. One subject's trial produced a right
-stride of 0.711 s against a left of 1.422 s, an exact 2 to 1 ratio. Each leg
-looked perfectly plausible on its own, and every per-leg check passed. It
-reached the optimizer as a symmetry index of +67.89%. Two legs of one person
-walking share a cadence, so when they disagree it is the detector that is
-wrong, not the participant. That is why the cross-leg checks exist.
-
-Those checks are automated in `hitlo.symmetry.leg_consistency`, which returns
-a list of human-readable warnings, and `hitlo.symmetry.axis_agreement`, which
-checks whether the two shanks resolved to the same rotation. They warn, they
-do not alter the symmetry index. Reading the warning is your job.
+There is an automatic version of the first three:
 
 ```python
 from hitlo.symmetry import leg_consistency
-
 for warning in leg_consistency(lt, rt, per_stride):
     print(warning)
 ```
 
+It prints warnings and changes nothing. Reading them is your job.
+
 ---
 
-## 9. First exercise
+## 6. Exercises
 
-Reproduce the symmetry index by hand and check it against `analyze_gyro`.
+### A. Compare five trials
 
-1. Pick a trial from the sample dataset.
-2. Load it with `load_streams` and the `cfg` dictionary from section 2.2.
-3. Run `detect` on each side.
-4. Get the walking window, with the `None` guard.
-5. Trim both sets of heel strikes by 3 seconds.
-6. Compute step times, then the symmetry index.
-7. Call `analyze_gyro(path, 3.0)` on the same file and compare.
+Run `analyze_gyro` on five trials from one subject and fill this in. Use
+`qc['si']`, `qc['n_left']`, `qc['n_right']`, `np.std(qc['per'])`, and
+`qc['left']['dominance']`.
 
-The two should agree to two decimal places. On the trial used here both give
-`+0.97`, because `analyze_gyro` runs exactly these steps.
+| trial | SI | left | right | sd | dominance L / R |
+| --- | --- | --- | --- | --- | --- |
+| Pre run-001 | | | | | |
+| Pre run-002 | | | | | |
+| Default run-005 | | | | | |
+| Default run-010 | | | | | |
+| Post run-003 | | | | | |
 
-When they agree, you have the whole pipeline in your head. Then do three more
-things:
+Then answer:
 
-- Make the QC plot and find the heel strikes visually in the top panel.
-  Convince yourself the markers sit where the trace crosses zero going
-  downward, just after each large peak.
-- Print `sd` for each side and note the dominance. Compare a well-mounted
-  trial against a poorly-mounted one if the sample dataset has both.
-- Change the trim from 3 seconds to 0 and see how much the symmetry index
-  moves. That tells you how much the edge strides were contributing.
+1. Which trial is the most symmetric, and which is the least?
+2. Between Pre run-001 and Pre run-002 the subject put the exoskeleton on, with
+   the motor switched off. How much did SI change? Is that bigger or smaller
+   than the differences between the Default trials?
+3. Does any trial fail a check from section 5?
 
-If the numbers do not match, the usual causes are a forgotten `cfg`, sorting
-one list of heel strikes but not the other, or swapping the return order of
-`compute_step_times`.
+For `sub-P091` the answers are at the bottom of this page. Do not look first.
+
+### B. Check the formula on one stride
+
+The pipeline gives you per-stride values, but it is worth confirming the
+formula does what you think once.
+
+```python
+qc = analyze_gyro(XDF, 3.0)
+r = qc['r_steps'][0]      # first right step, in seconds
+l = qc['l_steps'][0]      # first left step
+print(r, l, qc['per'][0])
+```
+
+Work out `2 × (r − l) / (r + l) × 100` on a calculator and check it against
+`qc['per'][0]`. On `sub-P091` `Pre` `run-001` the first stride is a right step
+of 0.5462 s and a left step of 0.5527 s, which gives −1.17.
+
+Notice how small the difference is. Six milliseconds out of half a second
+becomes more than a point of SI. That is why the detector interpolates contact
+times between samples instead of rounding to the nearest one.
+
+### C. See how much the trim matters
+
+Run `analyze_gyro` on the same file three times with `trim` of 0, 3 and 10
+seconds. Note the SI and the strike count each time. How much does throwing
+away 18 strides move the answer?
+
+---
+
+## 7. Two things that will bite you
+
+**Forgetting `cfg`.** `load_streams(path)` without the config dictionary
+silently uses the old Polar path and returns `(None, None)`. Define `cfg` once
+at the top and pass it to both `load_streams` and `detect`.
+
+**Mixing detectors.** The gyroscope marks the moment of contact. The
+accelerometer marks the impact shock that follows it, tens of milliseconds
+later. Numbers from the two are not comparable, so never check a gyro result
+against a baseline that was measured with the accelerometer.
 
 ---
 
@@ -542,7 +266,31 @@ one list of heel strikes but not the other, or swapping the return order of
 
 | Document | Covers |
 | --- | --- |
-| `docs/gyro_detection.md` | The detection rule in full, with its validation. Read this next. |
-| `docs/trigno_setup.md` | Hardware, the LSL bridge, and recording a session |
-| `docs/workflow.md` | How a session runs end to end |
+| `docs/gyro_detection.md` | The detection rule in full. Read this next. |
+| `docs/trigno_setup.md` | The hardware and how a session is recorded |
+| `docs/workflow.md` | How an experiment day runs |
 | `docs/detection_pipeline.md` | The old accelerometer method. Background only. |
+
+---
+
+## Answers to exercise A
+
+For `sub-P091` `ses-S001`:
+
+| trial | SI | left | right | sd | dominance L / R |
+| --- | --- | --- | --- | --- | --- |
+| Pre run-001 | +0.97 | 103 | 102 | 1.73 | 2.98 / 2.63 |
+| Pre run-002 | −9.07 | 96 | 96 | 2.32 | 3.53 / 2.91 |
+| Default run-005 | −6.44 | 42 | 42 | 2.56 | 3.32 / 2.99 |
+| Default run-010 | −11.04 | 37 | 37 | 2.77 | 2.83 / 2.78 |
+| Post run-003 | −3.69 | 138 | 137 | 2.07 | 3.07 / 2.71 |
+
+1. Pre run-001 is the most symmetric at +0.97. Default run-010 is the least at
+   −11.04.
+2. SI moved 10 points, from +0.97 to −9.07, just from wearing the device with
+   the motor off. The Default trials sit between −6.44 and −11.04, a spread of
+   about 5 points. So putting the device on did roughly twice as much as
+   anything the optimizer did afterward. That is worth knowing before you
+   interpret any of the Default trials.
+3. No. All five pass. Note that the Default trials have far fewer strikes,
+   around 40 against 100, because those trials are shorter.
