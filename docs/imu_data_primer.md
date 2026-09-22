@@ -193,75 +193,6 @@ for warning in leg_consistency(lt, rt, per_stride):
 
 It prints warnings and changes nothing. Reading them is your job.
 
----
-
-## 6. Exercises
-
-### A. Compare five trials
-
-Run `analyze_gyro` on five trials from one subject and fill this in. Use
-`qc['si']`, `qc['n_left']`, `qc['n_right']`, `np.std(qc['per'])`, and
-`qc['left']['dominance']`.
-
-| trial | SI | left | right | sd | dominance L / R |
-| --- | --- | --- | --- | --- | --- |
-| Pre run-001 | | | | | |
-| Pre run-002 | | | | | |
-| Default run-005 | | | | | |
-| Default run-010 | | | | | |
-| Post run-003 | | | | | |
-
-Then answer:
-
-1. Which trial is the most symmetric, and which is the least?
-2. Between Pre run-001 and Pre run-002 the subject put the exoskeleton on, with
-   the motor switched off. How much did SI change? Is that bigger or smaller
-   than the differences between the Default trials?
-3. Does any trial fail a check from section 5?
-
-For `sub-P091` the answers are at the bottom of this page. Do not look first.
-
-### B. Check the formula on one stride
-
-The pipeline gives you per-stride values, but it is worth confirming the
-formula does what you think once.
-
-```python
-qc = analyze_gyro(XDF, 3.0)
-r = qc['r_steps'][0]      # first right step, in seconds
-l = qc['l_steps'][0]      # first left step
-print(r, l, qc['per'][0])
-```
-
-Work out `2 × (r − l) / (r + l) × 100` on a calculator and check it against
-`qc['per'][0]`. On `sub-P091` `Pre` `run-001` the first stride is a right step
-of 0.5462 s and a left step of 0.5527 s, which gives −1.17.
-
-Notice how small the difference is. Six milliseconds out of half a second
-becomes more than a point of SI. That is why the detector interpolates contact
-times between samples instead of rounding to the nearest one.
-
-### C. See how much the trim matters
-
-Run `analyze_gyro` on the same file three times with `trim` of 0, 3 and 10
-seconds. Note the SI and the strike count each time. How much does throwing
-away 18 strides move the answer?
-
----
-
-## 7. Two things that will bite you
-
-**Forgetting `cfg`.** `load_streams(path)` without the config dictionary
-silently uses the old Polar path and returns `(None, None)`. Define `cfg` once
-at the top and pass it to both `load_streams` and `detect`.
-
-**Mixing detectors.** The gyroscope marks the moment of contact. The
-accelerometer marks the impact shock that follows it, tens of milliseconds
-later. Numbers from the two are not comparable, so never check a gyro result
-against a baseline that was measured with the accelerometer.
-
----
-
 ## Where to go next
 
 | Document | Covers |
@@ -271,26 +202,3 @@ against a baseline that was measured with the accelerometer.
 | `docs/workflow.md` | How an experiment day runs |
 | `docs/detection_pipeline.md` | The old accelerometer method. Background only. |
 
----
-
-## Answers to exercise A
-
-For `sub-P091` `ses-S001`:
-
-| trial | SI | left | right | sd | dominance L / R |
-| --- | --- | --- | --- | --- | --- |
-| Pre run-001 | +0.97 | 103 | 102 | 1.73 | 2.98 / 2.63 |
-| Pre run-002 | −9.07 | 96 | 96 | 2.32 | 3.53 / 2.91 |
-| Default run-005 | −6.44 | 42 | 42 | 2.56 | 3.32 / 2.99 |
-| Default run-010 | −11.04 | 37 | 37 | 2.77 | 2.83 / 2.78 |
-| Post run-003 | −3.69 | 138 | 137 | 2.07 | 3.07 / 2.71 |
-
-1. Pre run-001 is the most symmetric at +0.97. Default run-010 is the least at
-   −11.04.
-2. SI moved 10 points, from +0.97 to −9.07, just from wearing the device with
-   the motor off. The Default trials sit between −6.44 and −11.04, a spread of
-   about 5 points. So putting the device on did roughly twice as much as
-   anything the optimizer did afterward. That is worth knowing before you
-   interpret any of the Default trials.
-3. No. All five pass. Note that the Default trials have far fewer strikes,
-   around 40 against 100, because those trials are shorter.
