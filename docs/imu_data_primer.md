@@ -193,7 +193,22 @@ for warning in leg_consistency(lt, rt, per_stride):
 
 It prints warnings and changes nothing. Reading them is your job.
 
-## Where to go next
+---
+
+## 6. Two things
+
+**Forgetting `cfg`.** `load_streams(path)` without the config dictionary
+silently uses the old Polar path and returns `(None, None)`. Define `cfg` once
+at the top and pass it to both `load_streams` and `detect`.
+
+**Mixing detectors.** The gyroscope marks the moment of contact. The
+accelerometer marks the impact shock that follows it, tens of milliseconds
+later. Numbers from the two are not comparable, so never check a gyro result
+against a baseline that was measured with the accelerometer.
+
+---
+
+## 7. Where to go next
 
 | Document | Covers |
 | --- | --- |
@@ -202,3 +217,4 @@ It prints warnings and changes nothing. Reading them is your job.
 | `docs/workflow.md` | How an experiment day runs |
 | `docs/detection_pipeline.md` | The old accelerometer method. Background only. |
 
+---
